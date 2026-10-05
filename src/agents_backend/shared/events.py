@@ -1,19 +1,19 @@
-"""Emisor de eventos tipados del agente (canal paralelo al markdown).
+"""Event emitter for typed agent events (parallel channel to markdown).
 
-Las tools emiten eventos estructurados mientras el grafo conversacional
-genera el markdown de respuesta. El markdown se conserva para el historial
-y para OpenWebUI (legado); estos eventos alimentan los widgets del frontend
-(etapa 4) vía SSE/WebSocket desde exam-app.
+Tools emit structured events while the conversational graph generates the
+markdown response. The markdown is preserved for history and for OpenWebUI
+(legacy); these events feed the frontend widgets (stage 4) via SSE/WebSocket
+from exam-app.
 
-Mecanismo:
-  - `EventBus` en memoria, particionado por `thread_id` (una conversación
-    = un thread de LangGraph = un canal de eventos).
-  - Las tools obtienen el bus con `get_event_bus()` (contextvar propagada
-    por exam-app durante `astream_events`) y publican con `emit_event()`.
-  - Si nadie está suscrito, el evento se descarta (publicar es best-effort:
-    el markdown sigue siendo la fuente de verdad).
+Mechanism:
+  - `EventBus` in memory, partitioned by `thread_id` (one conversation
+    = one LangGraph thread = one event channel).
+  - Tools obtain the bus with `get_event_bus()` (contextvar propagated by
+    exam-app during `astream_events`) and publish with `emit_event()`.
+  - If nobody is subscribed, the event is discarded (publishing is
+    best-effort: the markdown remains the source of truth).
 
-Contrato de eventos (schema versionado, ver docs/arquitectura-objetivo.md §5):
+Event contract (versioned schema, see docs/arquitectura-objetivo.md §5):
   { "v": 1, "type": "question_generated", "thread_id": "...", ...payload }
 """
 from __future__ import annotations
@@ -28,15 +28,15 @@ from typing import Any
 
 
 class EventType(str, Enum):
-    """Tipos de evento que las tools emiten al frontend."""
+    """Event types that tools emit to the frontend."""
 
-    QUESTION_GENERATED = "question_generated"   # payload: GeneratedItem serializado
+    QUESTION_GENERATED = "question_generated"   # payload: serialized GeneratedItem
     QUESTIONS_LISTED = "questions_listed"       # payload: {"questions": [...], "total": n}
     ARTIFACT_READY = "artifact_ready"           # payload: {"kind": "pdf|csv|xlsx", "url", "filename"}
     MATERIAL_INDEXED = "material_indexed"       # payload: {"chunks": n, "filename", "subject_name"}
     QUESTION_SAVED = "question_saved"           # payload: {"question_id", "verified_by_human"}
     SUBJECT_REGISTERED = "subject_registered"   # payload: {"subject_id", "subject_name"}
-    CANCELLED = "cancelled"                     # payload: {"message"} — cancelación vía WS
+    CANCELLED = "cancelled"                     # payload: {"message"} — cancellation via WS
 
 
 SCHEMA_VERSION = 1
@@ -52,7 +52,7 @@ class AgentEvent:
     v: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
-        """Serializa el evento al contrato versionado del frontend."""
+        """Serializes the event to the versioned frontend contract."""
         return {
             "v": self.v,
             "type": self.type.value,
@@ -62,14 +62,14 @@ class AgentEvent:
 
 
 class EventBus:
-    """Bus de eventos en memoria, particionado por `thread_id`.
+    """In-memory event bus, partitioned by `thread_id`.
 
-    - `publish()` es thread-safe y best-effort (nunca bloquea ni lanza si
-      no hay suscriptores): las tools corren en el event loop o en hilos
-      del grafo y no deben fallar por el canal de eventos.
-    - `subscribe()` devuelve un iterador asíncrono (para SSE/WS en exam-app).
-    - Los eventos se acumulan en un buffer acotado por suscriptor para que
-      un consumidor lento no pierda los primeros eventos del turno.
+    - `publish()` is thread-safe and best-effort (never blocks nor raises if
+      there are no subscribers): tools run on the event loop or in graph
+      threads and must not fail because of the event channel.
+    - `subscribe()` returns an async iterator (for SSE/WS in exam-app).
+    - Events accumulate in a bounded per-subscriber buffer so a slow consumer
+      does not lose the first events of the turn.
     """
 
     def __init__(self, max_buffer: int = 256) -> None:
@@ -79,10 +79,10 @@ class EventBus:
         self._waiters: dict[str, list[asyncio.Event]] = {}
 
     # ------------------------------------------------------------------
-    # Publicación (lado de las tools)
+    # Publish (tools side)
     # ------------------------------------------------------------------
     def publish(self, event: AgentEvent) -> None:
-        """Publica un evento para el thread_id (thread-safe, best-effort)."""
+        """Publishes an event for the thread_id (thread-safe, best-effort)."""
         with self._lock:
             q = self._queues[event.thread_id]
             q.append(event)
@@ -96,10 +96,10 @@ class EventBus:
                 pass  # loop cerrado: nadie consume, se descarta
 
     # ------------------------------------------------------------------
-    # Suscripción (lado de exam-app: SSE / WS)
+    # Subscription (exam-app side: SSE / WS)
     # ------------------------------------------------------------------
     def subscribe(self, thread_id: str) -> "EventBusSubscription":
-        """Crea una suscripción iterables para el thread dado."""
+        """Creates an async-iterable subscription for the given thread."""
         return EventBusSubscription(self, thread_id)
 
     def _register_waiter(self, thread_id: str, ev: asyncio.Event) -> None:
@@ -124,18 +124,18 @@ class EventBus:
             return items
 
     def cancel_thread(self, thread_id: str) -> None:
-        """Marca el thread como cancelado: publica el evento y despierta."""
+        """Marks the thread as cancelled: publishes the event and wakes consumers."""
         self.publish(
             AgentEvent(
                 type=EventType.CANCELLED,
                 thread_id=thread_id,
-                payload={"message": "cancelado por el usuario"},
+                payload={"message": "cancelled by the user"},
             )
         )
 
 
 class EventBusSubscription:
-    """Suscripción asíncrona a los eventos de un thread (async iterator)."""
+    """Async subscription to the events of a thread (async iterator)."""
 
     def __init__(self, bus: EventBus, thread_id: str) -> None:
         self._bus = bus
@@ -167,30 +167,30 @@ class EventBusSubscription:
 
 
 # ----------------------------------------------------------------------
-# Contexto: el bus activo durante la ejecución del grafo
+# Context: the active bus during graph execution
 # ----------------------------------------------------------------------
 _event_bus: ContextVar[EventBus | None] = ContextVar("event_bus", default=None)
 _thread_id: ContextVar[str | None] = ContextVar("thread_id", default=None)
 
 
 def set_event_context(bus: EventBus | None, thread_id: str | None) -> None:
-    """Instala el bus y el thread_id para las tools del turno actual."""
+    """Installs the bus and thread_id for the tools of the current turn."""
     _event_bus.set(bus)
     _thread_id.set(thread_id)
 
 
 def get_event_bus() -> EventBus | None:
-    """Bus activo (None si la tool corre fuera de un turno con eventos)."""
+    """Active bus (None if the tool runs outside a turn with events)."""
     return _event_bus.get()
 
 
 def get_current_thread_id() -> str | None:
-    """thread_id del turno actual (None fuera de un turno)."""
+    """thread_id of the current turn (None outside a turn)."""
     return _thread_id.get()
 
 
 def emit_event(event_type: EventType, payload: dict[str, Any] | None = None) -> None:
-    """Helper para las tools: publica si hay bus activo (best-effort)."""
+    """Helper for tools: publishes if there is an active bus (best-effort)."""
     bus = get_event_bus()
     tid = get_current_thread_id()
     if bus is None or tid is None:

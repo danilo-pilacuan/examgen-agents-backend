@@ -1,9 +1,9 @@
-"""Estado del agente conversacional (chat con human-in-the-loop).
+"""State of the conversational agent (chat with human-in-the-loop).
 
-A diferencia del pipeline batch (`ExamGenerationState`), este estado es una
-conversación persistente con `MessagesState` de LangGraph: guarda el historial
-de mensajes y el contexto de la sesión (materia activa, preguntas pendientes
-de confirmación, etc.).
+Unlike the batch pipeline (`ExamGenerationState`), this state is a persistent
+conversation with LangGraph's `MessagesState`: it stores the message history
+and session context (active subject, pending questions awaiting confirmation,
+etc.).
 """
 from __future__ import annotations
 
@@ -13,17 +13,17 @@ from langgraph.graph.message import add_messages
 
 
 class ConversationalState(TypedDict):
-    """Estado del agente conversacional.
+    """State of the conversational agent.
 
-    `messages` usa el reducer `add_messages` de LangGraph y se persiste con
-    el checkpointer para mantener el contexto entre turnos.
+    `messages` uses LangGraph's `add_messages` reducer and is persisted with
+    the checkpointer to keep context between turns.
     """
     messages: Annotated[list, add_messages]
 
-    # --- Contexto de sesión ---
-    subject_id: Optional[str]          # materia activa de la conversación
+    # --- Session context ---
+    subject_id: Optional[str]          # active subject of the conversation
     subject_name: Optional[str]
 
-    # --- Pregunta en curso (pendiente de confirmación humana) ---
-    pending_item: Optional[dict]       # GeneratedItem serializado, listo para guardar
-    pending_question_id: Optional[str] # id en BD si ya se guardó y falta verificación
+    # --- Question in progress (pending human confirmation) ---
+    pending_item: Optional[dict]       # serialized GeneratedItem, ready to save
+    pending_question_id: Optional[str] # DB id if already saved and awaiting verification

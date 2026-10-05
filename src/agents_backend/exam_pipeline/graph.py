@@ -1,15 +1,15 @@
-"""Armado del grafo LangGraph que orquesta el pipeline de generación de exámenes.
+"""LangGraph graph that orchestrates the exam generation pipeline.
 
-Flujo:
-    ingestor → planner → generator → evaluator → (condicional)
-                aprobado → si quedan specs → generator (loop)
-                aprobado → sin specs → assembler → compiler → END
-                rechazado → reintenta o abandona spec → generator
+Flow:
+    ingestor → planner → generator → evaluator → (conditional)
+                approved → specs remaining → generator (loop)
+                approved → no specs → assembler → compiler → END
+                rejected → retry or abandon spec → generator
 
-Condicionales:
-    - `after_evaluation`: decide aprobar/rechazar el ítem actual.
-    - `should_continue`: decide si quedan specs por generar o se ensambla.
-    - `should_retry_compilation`: decide si se reintenta la compilación.
+Conditionals:
+    - `after_evaluation`: decides to approve/reject the current item.
+    - `should_continue`: decides whether specs remain or we assemble.
+    - `should_retry_compilation`: decides whether to retry compilation.
 """
 from typing import Any
 
@@ -29,10 +29,10 @@ from core.domain.schemas.exam import ExamBlueprint, ItemSpec
 
 
 # ---------------------------------------------------------------------------
-# Condicionales
+# Conditionals
 # ---------------------------------------------------------------------------
 def after_evaluation(state: dict) -> str:
-    """Ruta tras evaluar un ítem: 'accepted' o 'rejected'."""
+    """Route after evaluating an item: 'accepted' or 'rejected'."""
     evaluation = state.get("current_evaluation")
     if evaluation is not None and evaluation.approved:
         return "accepted"
@@ -40,14 +40,14 @@ def after_evaluation(state: dict) -> str:
 
 
 def should_continue(state: dict) -> str:
-    """¿Quedan specs por generar o pasamos al ensamblado?"""
+    """Are there specs left to generate, or do we move to assembly?"""
     if state.get("pending_specs"):
         return "continue"
     return "assemble"
 
 
 def should_retry_compilation(state: dict) -> str:
-    """¿Reintentamos la compilación o terminamos?"""
+    """Do we retry compilation or finish?"""
     if state.get("status") == "completed":
         return "end"
     if state.get("compilation_attempts", 0) >= settings.max_compilation_attempts:
@@ -56,10 +56,10 @@ def should_retry_compilation(state: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Nodos de ayuda para el bucle (aprobación / rechazo)
+# Loop helper nodes (accept / reject)
 # ---------------------------------------------------------------------------
 def _accept_item(state: dict) -> dict:
-    """Aprueba el ítem actual: lo agrega a approved_items y resetea reintentos."""
+    """Approves the current item: appends it to approved_items and resets retries."""
     item = state.get("current_item")
     eval_result = state.get("current_evaluation")
     spec = state.get("current_spec")
@@ -71,12 +71,12 @@ def _accept_item(state: dict) -> dict:
         "item_retry_count": 0,
         "total_llm_calls": state.get("total_llm_calls", 0),
     }
-    # Registrar rechazos previos del spec actual si los hubo (para métricas).
+    # Record previous rejections of the current spec (for metrics).
     return update
 
 
 def _reject_item(state: dict) -> dict:
-    """Registra el rechazo del ítem actual en el log de auditoría."""
+    """Records the rejection of the current item in the audit log."""
     spec = state.get("current_spec")
     eval_result = state.get("current_evaluation")
     retry_count = state.get("item_retry_count", 0) + 1
@@ -98,15 +98,15 @@ def _reject_item(state: dict) -> dict:
         "similarity_score": eval_result.similarity_score if eval_result else None,
     }
 
-    # Si se superó el límite de reintentos, abandonamos este spec.
+    # If the retry limit was exceeded, abandon this spec.
     abandon = retry_count >= settings.max_item_retries
     update: dict[str, Any] = {
         "item_retry_count": retry_count,
         "rejection_log": [entry],
     }
     if abandon:
-        # Descartar el spec actual sin aprobarlo y seguir con el siguiente.
-        # Lo removemos de pending_specs para que generator no lo retome.
+        # Discard the current spec without approving it and move to the next.
+        # We remove it from pending_specs so the generator won't pick it again.
         remaining = list(state.get("pending_specs", []))
         current = state.get("current_spec")
         if current is not None:
@@ -120,7 +120,7 @@ def _reject_item(state: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Construcción del grafo
+# Graph construction
 # ---------------------------------------------------------------------------
 def build_graph():
     graph = StateGraph(ExamGenerationState)
@@ -137,42 +137,42 @@ def build_graph():
     graph.set_entry_point("ingestor")
     graph.add_edge("ingestor", "planner")
 
-    # Planificador → generador si hay specs, si no directamente al ensamblado.
+    # Planner → generator if specs remain, otherwise straight to assembly.
     graph.add_conditional_edges(
         "planner",
         should_continue,
         {"continue": "generator", "assemble": "assembler"},
     )
 
-    # Generador → evaluador.
+    # Generator → evaluator.
     graph.add_edge("generator", "evaluator")
 
-    # Evaluador → aprobar o rechazar.
+    # Evaluator → approve or reject.
     graph.add_conditional_edges(
         "evaluator",
         after_evaluation,
         {"accepted": "accept", "rejected": "reject"},
     )
 
-    # Tras aprobar: ¿quedan specs? → generador o ensamblado.
+    # After approval: specs remaining? → generator or assembly.
     graph.add_conditional_edges(
         "accept",
         should_continue,
         {"continue": "generator", "assemble": "assembler"},
     )
 
-    # Tras rechazar: si abandonamos el spec, seguimos con el siguiente;
-    # si no quedan specs, pasamos al ensamblado.
+    # After rejection: if the spec was abandoned, move to the next;
+    # if no specs remain, go to assembly.
     graph.add_conditional_edges(
         "reject",
         should_continue,
         {"continue": "generator", "assemble": "assembler"},
     )
 
-    # Ensamblado → compilación.
+    # Assembly → compilation.
     graph.add_edge("assembler", "compiler")
 
-    # Compilación: reintentar o terminar.
+    # Compilation: retry or finish.
     graph.add_conditional_edges(
         "compiler",
         should_retry_compilation,
@@ -183,7 +183,7 @@ def build_graph():
 
 
 # ---------------------------------------------------------------------------
-# Helper de invocación
+# Invocation helper
 # ---------------------------------------------------------------------------
 def run_exam_pipeline(
     subject_id: str,
@@ -193,9 +193,9 @@ def run_exam_pipeline(
     blueprint: ExamBlueprint,
     persist: bool = True,
 ) -> dict:
-    """Punto de entrada: construye el estado inicial y ejecuta el grafo.
+    """Entry point: builds the initial state and runs the graph.
 
-    Si `persist=True`, guarda los ítems aprobados en la BD (con embeddings).
+    If `persist=True`, saves the approved items to the DB (with embeddings).
     """
     initial_state: dict[str, Any] = {
         "subject_id": subject_id,
@@ -228,7 +228,7 @@ def run_exam_pipeline(
     graph = build_graph()
     result = graph.invoke(initial_state)
 
-    # Persistir ítems aprobados en la BD (Fase 4)
+    # Persist approved items to the DB (Phase 4)
     if persist and result.get("approved_items"):
         from agents_backend.shared.persistence import persist_generated_items
 

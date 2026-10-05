@@ -1,14 +1,14 @@
-"""Grafo conversacional del agente con human-in-the-loop.
+"""Conversational graph of the agent with human-in-the-loop.
 
-Flujo:
-  - El LLM recibe el historial (`messages`) y el system prompt.
-  - Puede invocar tools (buscar, generar, guardar, confirmar verificación).
-  - Las tools de ESCRITURA (`guardar_pregunta`, `confirmar_verificacion_humana`)
-    pasan por un nodo de confirmación humana con `interrupt`: el grafo PAUSA
-    y espera la aprobación del humano antes de ejecutarlas.
-  - El checkpointer persiste el estado entre turnos.
+Flow:
+  - The LLM receives the history (`messages`) and the system prompt.
+  - It can invoke tools (search, generate, save, confirm verification).
+  - The WRITE tools (`save_question`, `confirm_human_verification`) pass
+    through a human-confirmation node with `interrupt`: the graph PAUSES
+    and waits for human approval before executing them.
+  - The checkpointer persists the state between turns.
 
-El grafo se expone como endpoint OpenAI-compatible para conectarlo a OpenWebUI.
+The graph is exposed as an OpenAI-compatible endpoint to connect to OpenWebUI.
 """
 from __future__ import annotations
 
@@ -23,39 +23,39 @@ from pydantic import ValidationError
 from agents_backend.conversational.prompts import SYSTEM_PROMPT
 from agents_backend.conversational.state import ConversationalState
 from agents_backend.conversational.tools import (
-    agregar_material_archivo,
-    buscar_preguntas,
-    confirmar_verificacion_humana,
-    exportar_preguntas,
-    generar_examen_pdf,
-    generar_pregunta,
-    guardar_pregunta,
-    guardar_pregunta_pendiente,
-    listar_material_materia,
-    listar_materias,
-    registrar_materia,
+    add_material_file,
+    confirm_human_verification,
+    export_questions,
+    generate_exam_pdf,
+    generate_question,
+    list_subject_material,
+    list_subjects,
+    register_subject,
+    save_pending_question,
+    save_question,
+    search_questions,
 )
 from agents_backend.shared.llm import get_llm
 from core.config import settings
 
 TOOLS = [
-    listar_materias,
-    buscar_preguntas,
-    exportar_preguntas,
-    generar_pregunta,
-    guardar_pregunta,
-    guardar_pregunta_pendiente,
-    confirmar_verificacion_humana,
-    generar_examen_pdf,
-    agregar_material_archivo,
-    listar_material_materia,
-    registrar_materia,
+    list_subjects,
+    search_questions,
+    export_questions,
+    generate_question,
+    save_question,
+    save_pending_question,
+    confirm_human_verification,
+    generate_exam_pdf,
+    add_material_file,
+    list_subject_material,
+    register_subject,
 ]
 TOOL_BY_NAME = {t.name: t for t in TOOLS}
 
-# Tools que implican ESCRITURA en la BD. Ya no usan `interrupt` (Open WebUI no
-# puede reanudarlo): la confirmación humana se maneja a nivel de prompt/LLM.
-WRITE_TOOLS = {"guardar_pregunta", "guardar_pregunta_pendiente", "confirmar_verificacion_humana"}
+# Tools that imply WRITING to the DB. They no longer use `interrupt` (Open WebUI
+# cannot resume it): human confirmation is handled at the prompt/LLM level.
+WRITE_TOOLS = {"save_question", "save_pending_question", "confirm_human_verification"}
 
 
 def _make_llm():
@@ -84,11 +84,11 @@ def _assistant_node(state: ConversationalState) -> dict:
 
 
 def _call_tools_node(state: ConversationalState) -> dict:
-    """Ejecuta las tool calls del último mensaje.
+    """Executes the tool calls of the last message.
 
-    Las tools de escritura se ejecutan directamente (sin `interrupt`): la
-    confirmación humana se maneja a nivel de prompt/LLM, que es compatible con
-    Open WebUI (que no puede reanudar interrupts de LangGraph).
+    Write tools run directly (no `interrupt`): human confirmation is handled
+    at the prompt/LLM level, which is compatible with Open WebUI (it cannot
+    resume LangGraph interrupts).
     """
     last_message = state["messages"][-1]
     tool_calls = getattr(last_message, "tool_calls", []) or []
@@ -104,7 +104,7 @@ def _call_tools_node(state: ConversationalState) -> dict:
         # Ejecutar la tool (lectura o escritura).
         tool = TOOL_BY_NAME.get(name)
         if tool is None:
-            results.append(ToolMessage(content=f"❌ Tool desconocida: {name}", tool_call_id=tool_id))
+            results.append(ToolMessage(content=f"❌ Unknown tool: {name}", tool_call_id=tool_id))
             continue
         try:
             content = tool.invoke(args)
@@ -117,16 +117,16 @@ def _call_tools_node(state: ConversationalState) -> dict:
                 for err in e.errors()[:5]
             )
             content = (
-                f"⚠️ Argumentos inválidos para la tool `{name}`. "
-                f"Corrígelos y vuelve a invocarla. Detalle: {errors}"
+                f"⚠️ Invalid arguments for the tool `{name}`. "
+                f"Fix them and invoke it again. Detail: {errors}"
             )
         except Exception as e:  # noqa: BLE001
-            content = f"❌ Error al ejecutar {name}: {str(e)[:200]}"
+            content = f"❌ Error executing {name}: {str(e)[:200]}"
         results.append(ToolMessage(content=content, tool_call_id=tool_id))
 
     # Sincronizar el pendiente del store con el estado del grafo: el
     # checkpointer persiste `pending_item`/`pending_subject_id` por thread
-    # (sustituye al antiguo global de módulo `_PENDING_ITEM`).
+    # (replaces the old module-level global `_PENDING_ITEM`).
     from agents_backend.shared.events import get_current_thread_id
     from agents_backend.shared.pending import pending_store
 
@@ -180,7 +180,7 @@ def build_conversational_graph(checkpointer=None):
     graph.add_node("tools", _call_tools_node)
 
     graph.add_edge(START, "assistant")
-    # Si el LLM pidió tools → tools; si no, termina.
+    # If the LLM requested tools → tools; otherwise, end.
     graph.add_conditional_edges(
         "assistant",
         lambda state: "tools" if (state["messages"][-1].tool_calls) else END,

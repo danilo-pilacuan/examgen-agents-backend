@@ -1,18 +1,18 @@
-"""Instrumentación de tokens y métricas del mundo agéntico.
+"""Token and metrics instrumentation for the agentic world.
 
-Elemento de acción 5 y 6 de la tesis: medir tokens consumidos (prompt +
-completion) por llamada LLM y en agregado, para poder reportar el costo
-real por examen / por pregunta (comparativa local vs. nube).
+Elements of actions 5 and 6 of the thesis: measure tokens consumed (prompt +
+completion) per LLM call and in aggregate, to report the real cost per exam /
+per question (local vs. cloud comparison).
 
-El `TokenTracker` es un callback de LangChain que se adjunta a los LLMs
-(`generator_llm` / `evaluator_llm` en `agents_backend/shared/llm.py`). Cada llamada
-del modelo dispara `on_llm_end`, donde se extrae `usage_metadata`
-(estándar de LangChain para ChatOpenAI) y se acumula.
+The `TokenTracker` is a LangChain callback attached to the LLMs
+(`generator_llm` / `evaluator_llm` in `agents_backend/shared/llm.py`). Each
+model call triggers `on_llm_end`, where `usage_metadata` (the LangChain
+standard for ChatOpenAI) is extracted and accumulated.
 
-Uso:
+Usage:
     from agents_backend.shared.metrics import token_tracker, get_usage_summary
     token_tracker.reset()
-    ...  # ejecutar el pipeline / grafo
+    ...  # run the pipeline / graph
     print(get_usage_summary())
 """
 from __future__ import annotations
@@ -24,14 +24,14 @@ from langchain_core.callbacks import BaseCallbackHandler
 
 
 class TokenTracker(BaseCallbackHandler):
-    """Callback de LangChain que acumula el uso de tokens por llamada LLM."""
+    """LangChain callback that accumulates token usage per LLM call."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.reset()
 
     def reset(self) -> None:
-        """Reinicia los acumuladores (llamar al inicio de cada corrida)."""
+        """Resets the accumulators (call at the start of each run)."""
         with self._lock:
             self.llm_calls = 0
             self.prompt_tokens = 0
@@ -40,7 +40,7 @@ class TokenTracker(BaseCallbackHandler):
             self.calls: list[dict] = []
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        """Se dispara al terminar cada llamada al LLM."""
+        """Fires when each LLM call finishes."""
         usage = self._extract_usage(response)
         if usage is None:
             return
@@ -53,11 +53,11 @@ class TokenTracker(BaseCallbackHandler):
 
     @staticmethod
     def _extract_usage(response: Any) -> dict | None:
-        """Extrae (prompt, completion, total) de una respuesta LangChain.
+        """Extracts (prompt, completion, total) from a LangChain response.
 
-        Soporta:
-          - `usage_metadata` del mensaje (estándar LangChain v0.2+).
-          - `llm_output["token_usage"]` (respuestas tipo OpenAI).
+        Supports:
+          - `usage_metadata` from the message (LangChain v0.2+ standard).
+          - `llm_output["token_usage"]` (OpenAI-style responses).
         """
         try:
             generations = getattr(response, "generations", None)
@@ -87,7 +87,7 @@ class TokenTracker(BaseCallbackHandler):
         return None
 
     def usage(self) -> dict:
-        """Devuelve los acumulados actuales como dict serializable a JSON."""
+        """Returns the current totals as a JSON-serializable dict."""
         with self._lock:
             return {
                 "llm_calls": self.llm_calls,
@@ -98,7 +98,7 @@ class TokenTracker(BaseCallbackHandler):
             }
 
     def summary(self) -> str:
-        """Resumen legible de una línea (para logs)."""
+        """One-line readable summary (for logs)."""
         with self._lock:
             return (
                 f"llm_calls={self.llm_calls} prompt={self.prompt_tokens} "
@@ -106,20 +106,20 @@ class TokenTracker(BaseCallbackHandler):
             )
 
 
-# Singleton global (thread-safe) reutilizable en toda la app.
+# Global singleton (thread-safe) reusable across the app.
 token_tracker = TokenTracker()
 
 
 def reset_token_usage() -> None:
-    """Reinicia el contador global de tokens."""
+    """Resets the global token counter."""
     token_tracker.reset()
 
 
 def get_token_usage() -> dict:
-    """Devuelve el uso de tokens acumulado (dict serializable)."""
+    """Returns the accumulated token usage (JSON-serializable dict)."""
     return token_tracker.usage()
 
 
 def get_usage_summary() -> str:
-    """Devuelve un resumen legible de una línea."""
+    """Returns a one-line readable summary."""
     return token_tracker.summary()

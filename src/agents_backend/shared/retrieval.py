@@ -1,7 +1,7 @@
-"""Búsqueda por similitud semántica (RAG) sobre material indexado en pgvector.
+"""Semantic similarity search (RAG) over material indexed in pgvector.
 
-Dado un texto de consulta (ej. el tema de una ranura), recupera los chunks
-más relevantes del material de una materia usando pgvector.
+Given a query text (e.g. a slot topic), retrieves the most relevant chunks
+of a subject's material using pgvector.
 """
 import uuid
 
@@ -20,9 +20,9 @@ def retrieve_chunks(
     min_score: float = 0.15,
     db: Session | None = None,
 ) -> list[dict]:
-    """Recupera los chunks más relevantes del material de una materia.
+    """Retrieves the most relevant chunks of a subject's material.
 
-    Devuelve una lista de dicts: [{"content": str, "score": float}, ...]
+    Returns a list of dicts: [{"content": str, "score": float}, ...]
     """
     if not query.strip():
         return []
@@ -32,11 +32,11 @@ def retrieve_chunks(
         db = SessionLocal()
 
     try:
-        # Embedding de la consulta
+        # Embedding of the query
         vec = embedder.embed([query])[0]
 
-        # Búsqueda por similitud coseno en pgvector
-        # (el operador <=> es distancia coseno; 1 - distancia = similitud)
+        # Cosine similarity search in pgvector
+        # (the <=> operator is cosine distance; 1 - distance = similarity)
         stmt = (
             select(
                 MaterialChunk.content,
@@ -60,11 +60,11 @@ def retrieve_chunks(
 
 
 def format_context(chunks: list[dict], max_chars_per_chunk: int = 1200) -> str:
-    """Formatea los chunks recuperados como contexto para el LLM."""
+    """Formats the retrieved chunks as context for the LLM."""
     if not chunks:
         return ""
     parts = []
     for i, c in enumerate(chunks, start=1):
         content = c["content"][:max_chars_per_chunk]
-        parts.append(f"[Fragmento {i} (relevancia {c['score']:.2f})]\n{content}")
+        parts.append(f"[Chunk {i} (score {c['score']:.2f})]\n{content}")
     return "\n\n".join(parts)

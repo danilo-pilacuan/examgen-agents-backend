@@ -1,14 +1,14 @@
-"""Herramientas (tools) del agente conversacional.
+"""Tools of the conversational agent.
 
-Cada tool encapsula UNA acción acotada sobre el banco de preguntas. El LLM
-las invoca mediante tool-calling. Toda escritura pasa por el service layer
-(`src/bank/service.py`), nunca por SQL directo.
+Each tool encapsulates ONE scoped action on the question bank. The LLM
+invokes them via tool-calling. All writes go through the service layer
+(`src/bank/service.py`), never direct SQL.
 
-Guardrails aplicados aquí:
-  - `_validate_exam_topic()`: rechaza temas fuera del ámbito de exámenes
-    (hiperespecialización).
-  - Generación de a UNA pregunta por llamada.
-  - Confirmación humana explícita para marcar `verified_by_human`.
+Guardrails applied here:
+  - `_validate_exam_topic()`: rejects topics outside the exam scope
+    (hyper-specialization).
+  - Generation of ONE question per call.
+  - Explicit human confirmation to mark `verified_by_human`.
 """
 from __future__ import annotations
 
@@ -25,34 +25,39 @@ from agents_backend.shared.pending import pending_store, PendingItem
 from core.domain.bank import service as bank
 from core.domain.schemas.exam import GeneratedItem, RetrievalConfig
 from core.domain.schemas.tools import (
-    AgregarMaterialArchivoInput,
-    BuscarPreguntasInput,
+    AddMaterialFileInput,
+    ConfirmVerificationInput,
     COLUMN_LABELS,
-    ConfirmarVerificacionInput,
     DEFAULT_TABLE_COLUMNS,
-    ExportarPreguntasInput,
-    GenerarExamenPdfInput,
-    GenerarPreguntaInput,
-    GuardarPreguntaInput,
-    GuardarPreguntaPendienteInput,
-    ListarMaterialInput,
-    ListarMateriasInput,
-    RegistrarMateriaInput,
+    ExportQuestionsInput,
+    GenerateExamPdfInput,
+    GenerateQuestionInput,
+    ListMaterialInput,
+    ListSubjectsInput,
+    RegisterSubjectInput,
+    SavePendingQuestionInput,
+    SaveQuestionInput,
+    SearchQuestionsInput,
     TableColumn,
 )
 
-# Temas que quedan FUERA del ámbito del agente (hiperespecialización).
+# Topics that are OUTSIDE the agent's scope (hyper-specialization).
+# English keywords first; Spanish synonyms kept so Spanish-speaking
+# professors also get a graceful rejection instead of a generated item.
 _OFF_TOPIC_KEYWORDS = [
-    "receta", "cocina", "película", "cine", "fútbol", "deporte", "noticia",
-    "chisme", "política general", "clima", "viaje", "música", "videojuego",
+    "recipe", "cooking", "movie", "cinema", "film", "football", "soccer",
+    "sport", "news", "gossip", "general politics", "weather", "travel",
+    "music", "video game",
+    "receta", "cocina", "pelicula", "cine", "futbol", "deporte", "noticia",
+    "chisme", "politica general", "clima", "viaje", "musica", "videojuego",
 ]
 
-# Ítem pendiente de guardar: store particionado por thread_id (ver
-# agents_backend/shared/pending.py). Lo rellena `generar_pregunta` y lo
-# consume `guardar_pregunta_pendiente`; `_call_tools_node` lo sincroniza con
-# ConversationalState.pending_item para que el checkpointer lo persista.
+# Pending item to save: store partitioned by thread_id (see
+# agents_backend/shared/pending.py). Filled by `generate_question` and
+# consumed by `save_pending_question`; `_call_tools_node` syncs it with
+# ConversationalState.pending_item so the checkpointer persists it.
 def get_pending_item(thread_id: str | None = None) -> tuple[dict | None, str | None]:
-    """Devuelve (item_pendiente, subject_id) del thread actual (o el dado)."""
+    """Returns (pending_item, subject_id) of the current thread (or the given one)."""
     tid = thread_id or _current_thread()
     pending = pending_store.get(tid) if tid else None
     if pending is None:
@@ -61,7 +66,7 @@ def get_pending_item(thread_id: str | None = None) -> tuple[dict | None, str | N
 
 
 def set_pending_item(item: dict | None, subject_id: str | None, thread_id: str | None = None) -> None:
-    """Guarda (o limpia) el ítem pendiente del thread actual (o el dado)."""
+    """Saves (or clears) the pending item of the current thread (or the given one)."""
     tid = thread_id or _current_thread()
     if tid is None:
         return
@@ -72,45 +77,45 @@ def set_pending_item(item: dict | None, subject_id: str | None, thread_id: str |
 
 
 def _current_thread() -> str | None:
-    """thread_id del turno actual según el contexto de eventos."""
+    """thread_id of the current turn according to the event context."""
     from agents_backend.shared.events import get_current_thread_id
     return get_current_thread_id()
 
 
 def _validate_exam_topic(topic: str) -> str | None:
-    """Devuelve un mensaje de rechazo si el tema está fuera del ámbito, o None."""
+    """Returns a rejection message if the topic is out of scope, or None."""
     t = topic.lower()
     for kw in _OFF_TOPIC_KEYWORDS:
         if kw in t:
             return (
-                f"Lo siento, no puedo ayudarte con '{topic}': está fuera de mi función. "
-                "Soy un asistente especializado en generar y gestionar preguntas de examen "
-                "a partir del material de tus materias. ¿Quieres que te ayude con un tema "
-                "de tus apuntes?"
+                f"Sorry, I can't help you with '{topic}': it is outside my function. "
+                "I am an assistant specialized in generating and managing exam questions "
+                "from your subjects' material. Would you like me to help you with a topic "
+                "from your notes?"
             )
     return None
 
 
 def _render_item_for_chat(item: GeneratedItem) -> str:
-    """Formatea un ítem generado para mostrarlo en el chat (sin LaTeX)."""
+    """Formats a generated item to show it in the chat (no LaTeX)."""
     lines = [f"📝 **{item.statement}**"]
     if item.options:
         for i, o in enumerate(item.options, start=1):
             lines.append(f"   {i}. {o.text}")
-    lines.append(f"✅ **Respuesta esperada:** {item.expected_answer}")
+    lines.append(f"✅ **Expected answer:** {item.expected_answer}")
     if item.solution_explanation:
-        lines.append(f"💡 **Explicación:** {item.solution_explanation}")
+        lines.append(f"💡 **Explanation:** {item.solution_explanation}")
     lines.append(
-        f"🏷 Tema: {item.topic} · Nivel: {item.bloom_level.value} · "
-        f"Dificultad: {item.difficulty.value} · Tipo: {item.question_type.value}"
+        f"🏷 Topic: {item.topic} · Level: {item.bloom_level.value} · "
+        f"Difficulty: {item.difficulty.value} · Type: {item.question_type.value}"
     )
     return "\n".join(lines)
 
 
 def _cell_value(q, column: TableColumn) -> str:
-    """Extrae el valor de una columna para una pregunta (celda de tabla)."""
+    """Extracts the value of a column for a question (table cell)."""
     if column == TableColumn.N:
-        return ""  # se rellena con el número de fila
+        return ""  # filled with the row number
     if column == TableColumn.ID:
         return f"`{q.id}`"
     if column == TableColumn.VERIFIED_BY_HUMAN:
@@ -120,7 +125,7 @@ def _cell_value(q, column: TableColumn) -> str:
     if column == TableColumn.AI_REVIEW_PRIORITY:
         return (q.ai_review_priority or "—").capitalize()
     if column == TableColumn.QUESTION_TEXT:
-        # El enunciado puede ser largo: se trunca para que la tabla sea legible.
+        # The statement can be long: it is truncated so the table stays readable.
         text = (q.question_text or "").replace("\n", " ").replace("|", "\\|")
         return text[:80] + ("…" if len(text) > 80 else "")
     if column == TableColumn.EXPECTED_ANSWER:
@@ -133,7 +138,7 @@ def _cell_value(q, column: TableColumn) -> str:
 
 
 def _render_questions_table(questions: list, columns: list[TableColumn]) -> str:
-    """Renderiza las preguntas como tabla markdown con las columnas pedidas."""
+    """Renders the questions as a markdown table with the requested columns."""
     header = [COLUMN_LABELS[c] for c in columns]
     rows = []
     for i, q in enumerate(questions, start=1):
@@ -154,20 +159,20 @@ def _render_questions_table(questions: list, columns: list[TableColumn]) -> str:
     return "\n".join(lines)
 
 
-@tool(args_schema=BuscarPreguntasInput)
-def buscar_preguntas(
+@tool(args_schema=SearchQuestionsInput)
+def search_questions(
     subject_id: str,
     topic: str | None = None,
     limit: int = 20,
     columns: list[str] | None = None,
 ) -> str:
-    """Recupera preguntas YA EXISTENTES del banco (no genera nuevas).
+    """Retrieves questions ALREADY EXISTING in the bank (does not generate new ones).
 
-    Úsala cuando el profesor pida 'dame N preguntas de estos temas' sin querer
-    generar nuevas. Devuelve las preguntas almacenadas en formato TABLA
-    markdown. Con `columns` el profesor puede pedir qué columnas mostrar
-    (ej. 'dame id, tema y dificultad en tabla'); si se omite se usa el set
-    por defecto.
+    Use it when the professor asks 'give me N questions on these topics' without
+    wanting to generate new ones. Returns the stored questions in markdown TABLE
+    format. With `columns` the professor can request which columns to show
+    (e.g. 'give me id, topic and difficulty in a table'); if omitted the default
+    set is used.
     """
     rejection = _validate_exam_topic(topic or "")
     if rejection:
@@ -180,12 +185,12 @@ def buscar_preguntas(
     )
     if not questions:
         return (
-            f"No hay preguntas en el banco para el tema '{topic or 'todas'}' "
-            "de esta materia. Puedo generar una nueva si me lo pides."
+            f"There are no questions in the bank for the topic '{topic or 'all'}' "
+            "of this subject. I can generate a new one if you ask me to."
         )
 
-    # Resolver columnas pedidas (validadas por args_schema como TableColumn);
-    # si no se pidieron, usar el set por defecto.
+    # Resolve requested columns (validated by args_schema as TableColumn);
+    # if none were requested, use the default set.
     if columns:
         table_columns = [TableColumn(c) for c in columns]
     else:
@@ -193,7 +198,7 @@ def buscar_preguntas(
 
     table = _render_questions_table(questions, table_columns)
 
-    # Evento tipado para la tabla interactiva del frontend.
+    # Typed event for the frontend's interactive table.
     emit_event(
         EventType.QUESTIONS_LISTED,
         {
@@ -220,26 +225,26 @@ def buscar_preguntas(
         },
     )
 
-    return f"📚 Encontré {len(questions)} pregunta(s) del banco:\n\n{table}"
+    return f"📚 I found {len(questions)} question(s) in the bank:\n\n{table}"
 
 
-@tool(args_schema=GenerarPreguntaInput)
-def generar_pregunta(
+@tool(args_schema=GenerateQuestionInput)
+def generate_question(
     subject_id: str,
     subject_name: str,
     topic: str,
-    difficulty: str = "medio",
+    difficulty: str = "medium",
 ) -> str:
-    """Genera UNA pregunta nueva sobre un tema, usando RAG sobre el material.
+    """Generates ONE new question on a topic, using RAG over the material.
 
-    Genera de a UNA pregunta (nunca varias). NO guarda todavía: devuelve la
-    pregunta para que el profesor la revise y confirme antes de guardar.
+    Generates ONE question at a time (never several). Does NOT save yet: it
+    returns the question for the professor to review and confirm before saving.
     """
     rejection = _validate_exam_topic(topic)
     if rejection:
         return rejection
 
-    # RAG: recuperar chunks relevantes al tema desde el material indexado.
+    # RAG: retrieve chunks relevant to the topic from the indexed material.
     retrieval_cfg = RetrievalConfig(top_k=3, min_score=0.15, use_rag=True)
     context = ""
     try:
@@ -255,37 +260,37 @@ def generar_pregunta(
         context = ""
 
     prompt = (
-        "Eres un generador de ítems de examen. Genera EXACTAMENTE UNA pregunta "
-        f"sobre el tema '{topic}' de la materia '{subject_name}', con dificultad "
-        f"'{difficulty}'. Usa el contexto del material si está disponible.\n\n"
-        f"{context or 'Sin contexto adicional del material.'}\n\n"
-        "Devuelve solo la estructura solicitada."
+        "You are an exam item generator. Generate EXACTLY ONE question "
+        f"on the topic '{topic}' of the subject '{subject_name}', with difficulty "
+        f"'{difficulty}'. Use the material context if available.\n\n"
+        f"{context or 'No additional context from the material.'}\n\n"
+        "Return only the requested structure."
     )
 
     try:
         structured = generator_llm.with_structured_output(GeneratedItem)
         item: GeneratedItem = structured.invoke(prompt)
     except Exception as e:  # noqa: BLE001
-        return f"❌ No pude generar la pregunta: {str(e)[:200]}"
+        return f"❌ I could not generate the question: {str(e)[:200]}"
 
-    # Guardar el ítem pendiente para que, al confirmar, `guardar_pregunta_pendiente`
-    # lo persista sin que el LLM tenga que re-especificar todos los datos.
+    # Store the pending item so that, upon confirmation, `save_pending_question`
+    # persists it without the LLM having to re-specify all the data.
     set_pending_item(item.model_dump(), subject_id)
 
-    # Evento tipado para el widget de pregunta del frontend (HITL).
+    # Typed event for the frontend's question widget (HITL).
     emit_event(EventType.QUESTION_GENERATED, {"question": item.model_dump()})
 
-    # No se guarda aún: se devuelve para revisión humana (HITL).
+    # Not saved yet: returned for human review (HITL).
     return (
-        "Generé esta pregunta (aún NO está guardada):\n\n"
+        "I generated this question (NOT saved yet):\n\n"
         f"{_render_item_for_chat(item)}\n\n"
-        "¿La guardo en el banco? Responde **sí** para guardarla como verificada, "
-        "o dime qué ajustar."
+        "Shall I save it to the bank? Answer **yes** to save it as verified, "
+        "or tell me what to adjust."
     )
 
 
-@tool(args_schema=GuardarPreguntaInput)
-def guardar_pregunta(
+@tool(args_schema=SaveQuestionInput)
+def save_question(
     subject_id: str,
     topic: str,
     bloom_level: str,
@@ -298,17 +303,17 @@ def guardar_pregunta(
     subtopic: str | None = None,
     points: float = 1.0,
 ) -> str:
-    """Guarda una pregunta en el banco (con verificación por IA).
+    """Saves a question to the bank (with AI verification).
 
-    ⚠️ Esta tool NO marca `verified_by_human`. La verificación humana se hace
-    por separado tras la confirmación explícita del profesor.
+    ⚠️ This tool does NOT mark `verified_by_human`. Human verification is done
+    separately after the professor's explicit confirmation.
     """
-    # Embedding para guardar (RAG de preguntas).
+    # Embedding for saving (question RAG).
     from core.infrastructure.embeddings.embedder import embedder
 
     vec = embedder.embed([question_text])[0]
 
-    # Verificación por IA ANTES de persistir (para marcar prioridad de revisión).
+    # AI verification BEFORE persisting (to set the review priority).
     from agents_backend.shared.verifier import review_question
 
     item_for_review = {
@@ -343,77 +348,77 @@ def guardar_pregunta(
         ai_review_priority=review.priority,
     )
     review_note = (
-        f"\n🔍 **Verificación por IA:** {'aprobada' if review.verified_by_ai else 'requiere revisión'} "
-        f"(prioridad {review.priority}). {review.notes}"
+        f"\n🔍 **AI verification:** {'approved' if review.verified_by_ai else 'requires review'} "
+        f"(priority {review.priority}). {review.notes}"
         if review.notes
         else ""
     )
 
-    # Evento tipado: pregunta guardada (el frontend actualiza el banco).
+    # Typed event: question saved (the frontend refreshes the bank).
     emit_event(
         EventType.QUESTION_SAVED,
         {"question_id": str(q.id), "verified_by_human": False},
     )
 
     return (
-        f"✅ Pregunta guardada en el banco (id: {q.id}).{review_note}\n"
-        "Aún NO está marcada como verificada por humano. "
-        "¿La confirmas como verificada?"
+        f"✅ Question saved to the bank (id: {q.id}).{review_note}\n"
+        "It is NOT marked as verified by human yet. "
+        "Do you confirm it as verified?"
     )
 
 
-@tool(args_schema=ConfirmarVerificacionInput)
-def confirmar_verificacion_humana(question_id: str) -> str:
-    """Marca una pregunta como VERIFICADA POR HUMANO.
+@tool(args_schema=ConfirmVerificationInput)
+def confirm_human_verification(question_id: str) -> str:
+    """Marks a question as VERIFIED BY HUMAN.
 
-    ⚠️ SOLO debe invocarse tras la confirmación explícita del profesor en el
-    chat (human-in-the-loop). Una vez verificada, la pregunta queda protegida
-    contra modificaciones del agente.
+    ⚠️ It must ONLY be invoked after the professor's explicit confirmation in
+    the chat (human-in-the-loop). Once verified, the question is protected
+    against modifications by the agent.
     """
     try:
         q = bank.set_human_verification(question_id, verified=True)
     except Exception as e:  # noqa: BLE001
-        return f"❌ No se pudo verificar: {str(e)[:200]}"
+        return f"❌ Could not verify: {str(e)[:200]}"
     return (
-        f"✅ Pregunta {q.id} marcada como **verificada por humano**. "
-        "A partir de ahora no podrá ser modificada por el agente."
+        f"✅ Question {q.id} marked as **verified by human**. "
+        "From now on it cannot be modified by the agent."
     )
 
 
-@tool(args_schema=GuardarPreguntaPendienteInput)
-def guardar_pregunta_pendiente(verificar_humano: bool = False) -> str:
-    """Guarda en el banco la ÚLTIMA pregunta generada (pendiente de confirmación).
+@tool(args_schema=SavePendingQuestionInput)
+def save_pending_question(verify_human: bool = False) -> str:
+    """Saves the LAST generated question to the bank (pending confirmation).
 
-    Usa los datos de la pregunta que `generar_pregunta` dejó pendiente, así el
-    LLM no tiene que re-especificar todos los campos. Si `verificar_humano=True`,
-    además la marca como verificada por humano (tras confirmación del profesor).
+    Uses the data of the question that `generate_question` left pending, so the
+    LLM does not have to re-specify all the fields. If `verify_human=True`, it
+    also marks it as verified by human (after the professor's confirmation).
     """
     item, subject_id = get_pending_item()
     if not item or not subject_id:
         return (
-            "No hay una pregunta pendiente de guardar. Primero genera una pregunta "
-            "con la tool `generar_pregunta`."
+            "There is no pending question to save. First generate a question "
+            "with the `generate_question` tool."
         )
 
-    # Re-validar el pendiente contra el contrato GeneratedItem: el dict quedó
-    # en memoria de módulo y debe cumplir el mismo esquema estricto.
+    # Re-validate the pending item against the GeneratedItem contract: the dict
+    # lived in module memory and must comply with the same strict schema.
     try:
         item_model = GeneratedItem.model_validate(item)
     except Exception as e:  # noqa: BLE001
         return (
-            "⚠️ La pregunta pendiente no cumple el esquema esperado y no se guardó. "
-            "Vuelve a generarla con `generar_pregunta`. "
-            f"Detalle: {str(e)[:200]}"
+            "⚠️ The pending question does not comply with the expected schema and was not saved. "
+            "Generate it again with `generate_question`. "
+            f"Detail: {str(e)[:200]}"
         )
     item = item_model.model_dump()
 
     from core.infrastructure.embeddings.embedder import embedder
     from agents_backend.shared.verifier import review_question
 
-    # Embedding para guardar (RAG de preguntas).
+    # Embedding for saving (question RAG).
     vec = embedder.embed([item["statement"]])[0]
 
-    # Verificación por IA antes de persistir.
+    # AI verification before persisting.
     review = review_question(item)
 
     q = bank.create_question(
@@ -436,18 +441,18 @@ def guardar_pregunta_pendiente(verificar_humano: bool = False) -> str:
         ai_review_priority=review.priority,
     )
 
-    # Limpiar el pendiente.
+    # Clear the pending item.
     set_pending_item(None, None)
 
     review_note = (
-        f"\n🔍 **Verificación por IA:** {'aprobada' if review.verified_by_ai else 'requiere revisión'} "
-        f"(prioridad {review.priority}). {review.notes}"
+        f"\n🔍 **AI verification:** {'approved' if review.verified_by_ai else 'requires review'} "
+        f"(priority {review.priority}). {review.notes}"
         if review.notes
         else ""
     )
 
-    # Si el profesor confirmó la verificación humana, marcarla.
-    if verificar_humano:
+    # If the professor confirmed human verification, mark it.
+    if verify_human:
         try:
             bank.set_human_verification(q.id, verified=True)
         except Exception as e:  # noqa: BLE001
@@ -456,16 +461,16 @@ def guardar_pregunta_pendiente(verificar_humano: bool = False) -> str:
                 {"question_id": str(q.id), "verified_by_human": False},
             )
             return (
-                f"✅ Pregunta guardada (id: {q.id}).{review_note}\n"
-                f"⚠️ No se pudo marcar como verificada: {str(e)[:120]}"
+                f"✅ Question saved (id: {q.id}).{review_note}\n"
+                f"⚠️ Could not mark it as verified: {str(e)[:120]}"
             )
         emit_event(
             EventType.QUESTION_SAVED,
             {"question_id": str(q.id), "verified_by_human": True},
         )
         return (
-            f"✅ Pregunta guardada y **verificada por humano** (id: {q.id}).{review_note}\n"
-            "A partir de ahora no podrá ser modificada por el agente."
+            f"✅ Question saved and **verified by human** (id: {q.id}).{review_note}\n"
+            "From now on it cannot be modified by the agent."
         )
 
     emit_event(
@@ -473,18 +478,18 @@ def guardar_pregunta_pendiente(verificar_humano: bool = False) -> str:
         {"question_id": str(q.id), "verified_by_human": False},
     )
     return (
-        f"✅ Pregunta guardada en el banco (id: {q.id}).{review_note}\n"
-        "Aún NO está marcada como verificada por humano. "
-        "¿La confirmas como verificada?"
+        f"✅ Question saved to the bank (id: {q.id}).{review_note}\n"
+        "It is NOT marked as verified by human yet. "
+        "Do you confirm it as verified?"
     )
 
 
-@tool(args_schema=ListarMateriasInput)
-def listar_materias() -> str:
-    """Lista las materias registradas en el sistema.
+@tool(args_schema=ListSubjectsInput)
+def list_subjects() -> str:
+    """Lists the subjects registered in the system.
 
-    Úsala cuando el profesor pregunte qué materias existen o cuáles puede
-    usar. Devuelve el id y nombre de cada materia registrada.
+    Use it when the professor asks which subjects exist or which ones they can
+    use. Returns the id and name of each registered subject.
     """
     from core.infrastructure.db.connection import SessionLocal
     from core.domain.models import Subject
@@ -496,31 +501,31 @@ def listar_materias() -> str:
         db.close()
 
     if not subjects:
-        return "No hay materias registradas todavía. Puedes registrar una indicándome su nombre."
+        return "There are no subjects registered yet. You can register one by telling me its name."
 
-    lines = ["📚 Materias registradas:"]
+    lines = ["📚 Registered subjects:"]
     for s in subjects:
         lines.append(f"- **{s.name}** (id: `{s.id}`)")
-    lines.append("\nIndícame el id de la materia sobre la que quieras trabajar.")
+    lines.append("\nTell me the id of the subject you want to work with.")
     return "\n".join(lines)
 
 
-@tool(args_schema=GenerarExamenPdfInput)
-def generar_examen_pdf(
+@tool(args_schema=GenerateExamPdfInput)
+def generate_exam_pdf(
     subject_id: str,
     subject_name: str,
     total_questions: int = 5,
     use_bank: bool = True,
     num_versions: int = 1,
 ) -> str:
-    """Genera un examen a partir del banco de preguntas y devuelve un PDF.
+    """Generates an exam from the question bank and returns a PDF.
 
-    Construye un examen usando las preguntas YA EXISTENTES del banco de la
-    materia (si `use_bank=True`) o generando nuevas. Compila el LaTeX a PDF
-    y lo sube como adjunto a Open WebUI.
+    Builds an exam using the subject's questions ALREADY EXISTING in the bank
+    (if `use_bank=True`) or generating new ones. Compiles the LaTeX to PDF and
+    uploads it as an attachment to Open WebUI.
 
-    Si `num_versions > 1`, genera varias versiones del examen (preguntas y
-    opciones barajadas, estilo AMC anti-copia) y adjunta cada PDF.
+    If `num_versions > 1`, generates several versions of the exam (shuffled
+    questions and options, AMC anti-copy style) and attaches each PDF.
     """
     from agents_backend.exam_pipeline.graph import run_exam_pipeline
     from core.domain.schemas.exam import (
@@ -530,33 +535,33 @@ def generar_examen_pdf(
     )
     from core.infrastructure.latex.templates.registry import TemplateId
 
-    # Recuperar preguntas del banco para armar el examen (reutilizar, no generar).
+    # Retrieve bank questions to build the exam (reuse, don't generate).
     questions = bank.list_questions(
         subject_id=subject_id,
         limit=total_questions,
     )
     if not questions:
         return (
-            f"No hay preguntas en el banco para la materia '{subject_name}'. "
-            "Primero genera y guarda algunas preguntas, o pide generar un examen "
-            "con preguntas nuevas."
+            f"There are no questions in the bank for the subject '{subject_name}'. "
+            "First generate and save some questions, or ask to generate an exam "
+            "with new questions."
         )
 
-    # Construir un blueprint que pida exactamente `total_questions` preguntas,
-    # distribuidas uniformemente (el pipeline las generará con RAG del material).
+    # Build a blueprint that requests exactly `total_questions` questions,
+    # uniformly distributed (the pipeline will generate them with material RAG).
     blueprint = ExamBlueprint(
         subject_id=subject_id,
         total_questions=total_questions,
         bloom_distribution={
-            BloomLevel.RECORDAR: 0.25,
-            BloomLevel.COMPRENDER: 0.25,
-            BloomLevel.APLICAR: 0.25,
-            BloomLevel.ANALIZAR: 0.25,
+            BloomLevel.REMEMBER: 0.25,
+            BloomLevel.UNDERSTAND: 0.25,
+            BloomLevel.APPLY: 0.25,
+            BloomLevel.ANALYZE: 0.25,
         },
         difficulty_distribution={
-            Difficulty.FACIL: 0.4,
-            Difficulty.MEDIO: 0.4,
-            Difficulty.DIFICIL: 0.2,
+            Difficulty.EASY: 0.4,
+            Difficulty.MEDIUM: 0.4,
+            Difficulty.HARD: 0.2,
         },
         topics_weight={"General": 1.0},
         estimated_duration_minutes=60,
@@ -570,12 +575,12 @@ def generar_examen_pdf(
             template_id=TemplateId.BASE_EXAM,
             raw_materials_paths=[],
             blueprint=blueprint,
-            persist=False,  # no duplicar: las preguntas ya están en el banco
+            persist=False,  # no duplicates: the questions are already in the bank
         )
     except Exception as e:  # noqa: BLE001
-        return f"❌ Error al generar el examen: {str(e)[:300]}"
+        return f"❌ Error generating the exam: {str(e)[:300]}"
 
-    # Rutas de los PDFs (varias si num_versions>1).
+    # PDF paths (several if num_versions>1).
     pdf_paths = None
     if result.get("compiled_exam"):
         pdf_paths = result["compiled_exam"].pdf_paths or (
@@ -584,11 +589,11 @@ def generar_examen_pdf(
 
     if not pdf_paths:
         return (
-            "No se pudo compilar el PDF del examen. "
-            f"Status: {result.get('status')} · Error: {result.get('error_message', 'desconocido')}"
+            "Could not compile the exam PDF. "
+            f"Status: {result.get('status')} · Error: {result.get('error_message', 'unknown')}"
         )
 
-    # Eventos tipados: un artifact_ready por cada versión del PDF.
+    # Typed events: one artifact_ready per PDF version.
     for i, p in enumerate(pdf_paths):
         emit_event(
             EventType.ARTIFACT_READY,
@@ -600,7 +605,7 @@ def generar_examen_pdf(
             },
         )
 
-    # Subir cada PDF a Open WebUI como adjunto nativo del chat.
+    # Upload each PDF to Open WebUI as a native chat attachment.
     try:
         from exam_app.infrastructure.openwebui_bridge import upload_file_to_openwebui, build_attachment_markdown
 
@@ -610,47 +615,47 @@ def generar_examen_pdf(
             attachments.append(build_attachment_markdown(upload_result))
         attachment_md = "\n\n".join(attachments)
     except Exception as e:  # noqa: BLE001
-        # Si falla la subida, caemos al enlace HTTP directo.
+        # If the upload fails, fall back to the direct HTTP link.
         links = "\n".join(
-            f"- 📥 [Descargar PDF v{i + 1}](http://localhost:8000/output/{Path(p).name})"
+            f"- 📥 [Download PDF v{i + 1}](http://localhost:8000/output/{Path(p).name})"
             for i, p in enumerate(pdf_paths)
         )
         attachment_md = (
-            f"📄 **Examen generado y compilado a PDF.**\n"
-            f"- Materia: **{subject_name}**\n"
-            f"- Preguntas: {len(result.get('approved_items', []))}\n"
+            f"📄 **Exam generated and compiled to PDF.**\n"
+            f"- Subject: **{subject_name}**\n"
+            f"- Questions: {len(result.get('approved_items', []))}\n"
             f"{links}\n\n"
-            f"*(No se pudo adjuntar a Open WebUI: {str(e)[:120]})*"
+            f"*(Could not attach to Open WebUI: {str(e)[:120]})*"
         )
 
-    version_note = f" · Versiones: {num_versions}" if num_versions > 1 else ""
+    version_note = f" · Versions: {num_versions}" if num_versions > 1 else ""
     return (
-        f"✅ **Examen generado correctamente.**\n"
-        f"- Materia: **{subject_name}**\n"
-        f"- Preguntas: {len(result.get('approved_items', []))}{version_note}\n\n"
+        f"✅ **Exam generated successfully.**\n"
+        f"- Subject: **{subject_name}**\n"
+        f"- Questions: {len(result.get('approved_items', []))}{version_note}\n\n"
         f"{attachment_md}"
     )
 
 
-@tool(args_schema=ExportarPreguntasInput)
-def exportar_preguntas(
+@tool(args_schema=ExportQuestionsInput)
+def export_questions(
     subject_id: str,
-    formato: str = "csv",
+    format: str = "csv",
     topic: str | None = None,
     limit: int = 100,
 ) -> str:
-    """EXPORTA las preguntas del banco a un archivo CSV o Excel (xlsx).
+    """EXPORTS the bank questions to a CSV or Excel (xlsx) file.
 
-    Úsala cuando el profesor pida 'exporta las preguntas', 'descárgamelas en
-    Excel/CSV' o quiera llevar el banco a una hoja de cálculo. Genera el
-    archivo con TODAS las columnas del banco (enunciado, opciones, respuesta,
-    solución, verificación, etc.) y lo sube como adjunto descargable al chat.
+    Use it when the professor asks 'export the questions', 'download them in
+    Excel/CSV' or wants to take the bank to a spreadsheet. Generates the file
+    with ALL the bank columns (statement, options, answer, solution,
+    verification, etc.) and uploads it as a downloadable chat attachment.
 
     Args:
-        subject_id: id de la materia (UUID).
-        formato: 'csv' o 'xlsx' (Excel).
-        topic: filtro opcional por tema exacto.
-        limit: nº máximo de preguntas a exportar (1-500).
+        subject_id: subject id (UUID).
+        format: 'csv' or 'xlsx' (Excel).
+        topic: optional filter by exact topic.
+        limit: max number of questions to export (1-500).
     """
     import csv
     import io
@@ -658,7 +663,7 @@ def exportar_preguntas(
 
     from exam_app.infrastructure.openwebui_bridge import upload_file_to_openwebui, build_attachment_markdown
 
-    fmt = (formato or "csv").strip().lower()
+    fmt = (format or "csv").strip().lower()
     if fmt not in ("csv", "xlsx"):
         fmt = "csv"
 
@@ -669,11 +674,11 @@ def exportar_preguntas(
     )
     if not questions:
         return (
-            f"No hay preguntas en el banco para exportar "
-            f"(tema: '{topic or 'todas'}')."
+            f"There are no questions in the bank to export "
+            f"(topic: '{topic or 'all'}')."
         )
 
-    # Columnas completas del banco (en orden legible para una hoja de cálculo).
+    # Full bank columns (in a spreadsheet-friendly readable order).
     export_columns = [
         TableColumn.N,
         TableColumn.ID,
@@ -695,13 +700,13 @@ def exportar_preguntas(
     ]
 
     def _plain(q, column: TableColumn) -> str:
-        """Valor plano de una celda (sin markdown, para CSV/Excel)."""
+        """Plain value of a cell (no markdown, for CSV/Excel)."""
         if column == TableColumn.N:
             return ""
         if column == TableColumn.VERIFIED_BY_HUMAN:
-            return "sí" if q.verified_by_human else "no"
+            return "yes" if q.verified_by_human else "no"
         if column == TableColumn.VERIFIED_BY_AI:
-            return "sí" if q.verified_by_ai else "no"
+            return "yes" if q.verified_by_ai else "no"
         if column == TableColumn.OPTIONS:
             opts = q.options or []
             if not opts:
@@ -729,7 +734,7 @@ def exportar_preguntas(
     headers = [COLUMN_LABELS[c] for c in export_columns]
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Directorio de salida (compartido con latex-compiler y servido por /output).
+    # Output directory (shared with latex-compiler and served by /output).
     from core.infrastructure.files.output_paths import get_output_dir
 
     OUTPUT_DIR = get_output_dir()
@@ -740,15 +745,15 @@ def exportar_preguntas(
 
             wb = Workbook()
             ws = wb.active
-            ws.title = "Preguntas"
+            ws.title = "Questions"
             ws.append(headers)
             for row in rows:
                 ws.append(row)
-            # Ajustar ancho de columnas (cap a 60 chars para no deformar).
+            # Adjust column widths (capped at 60 chars to avoid distortion).
             for col_idx, h in enumerate(headers, start=1):
                 width = max((len(str(row[col_idx - 1])) for row in rows), default=10)
                 ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max(width + 2, 10), 60)
-            out_path = OUTPUT_DIR / f"preguntas_{stamp}.xlsx"
+            out_path = OUTPUT_DIR / f"questions_{stamp}.xlsx"
             wb.save(out_path)
             mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         else:
@@ -756,13 +761,13 @@ def exportar_preguntas(
             writer = csv.writer(buf, quoting=csv.QUOTE_ALL)
             writer.writerow(headers)
             writer.writerows(rows)
-            out_path = OUTPUT_DIR / f"preguntas_{stamp}.csv"
-            out_path.write_text("\ufeff" + buf.getvalue(), encoding="utf-8")  # BOM para Excel
+            out_path = OUTPUT_DIR / f"questions_{stamp}.csv"
+            out_path.write_text("\ufeff" + buf.getvalue(), encoding="utf-8")  # BOM for Excel
             mime = "text/csv"
     except Exception as e:  # noqa: BLE001
-        return f"❌ No pude generar el archivo de exportación: {str(e)[:200]}"
+        return f"❌ I could not generate the export file: {str(e)[:200]}"
 
-    # Evento tipado: card de artefacto descargable en el frontend.
+    # Typed event: downloadable artifact card in the frontend.
     emit_event(
         EventType.ARTIFACT_READY,
         {
@@ -772,76 +777,76 @@ def exportar_preguntas(
         },
     )
 
-    # Subir el archivo a Open WebUI como adjunto nativo del chat.
+    # Upload the file to Open WebUI as a native chat attachment.
     try:
         upload = upload_file_to_openwebui(out_path, mime_type=mime)
-        titulo = (
-            f"📊 **Exportación de {len(questions)} pregunta(s) en Excel adjunta al chat.**"
+        title = (
+            f"📊 **Export of {len(questions)} question(s) in Excel attached to the chat.**"
             if fmt == "xlsx"
-            else f"📊 **Exportación de {len(questions)} pregunta(s) en CSV adjunta al chat.**"
+            else f"📊 **Export of {len(questions)} question(s) in CSV attached to the chat.**"
         )
-        etiqueta = "Descargar el Excel" if fmt == "xlsx" else "Descargar el CSV"
-        attachment_md = build_attachment_markdown(upload, titulo=titulo, etiqueta=etiqueta)
+        label = "Download the Excel" if fmt == "xlsx" else "Download the CSV"
+        attachment_md = build_attachment_markdown(upload, titulo=title, etiqueta=label)
     except Exception as e:  # noqa: BLE001
-        # Fallback: enlace HTTP directo servido por la API.
+        # Fallback: direct HTTP link served by the API.
         attachment_md = (
-            f"📥 [Descargar {out_path.name}](http://localhost:8000/output/{out_path.name})\n\n"
-            f"*(No se pudo adjuntar a Open WebUI: {str(e)[:120]})*"
+            f"📥 [Download {out_path.name}](http://localhost:8000/output/{out_path.name})\n\n"
+            f"*(Could not attach to Open WebUI: {str(e)[:120]})*"
         )
 
     return (
-        f"✅ Exporté **{len(questions)} pregunta(s)** del banco "
-        f"(formato: {fmt.upper()}).\n\n{attachment_md}"
+        f"✅ Exported **{len(questions)} question(s)** from the bank "
+        f"(format: {fmt.upper()}).\n\n{attachment_md}"
     )
 
 
-@tool(args_schema=AgregarMaterialArchivoInput)
-def agregar_material_archivo(
+@tool(args_schema=AddMaterialFileInput)
+def add_material_file(
     file_id: str,
     subject_id: str,
     subject_name: str,
     clear_previous: bool = False,
 ) -> str:
-    """Agrega un archivo adjunto del chat como material de estudio de una materia.
+    """Adds a chat-attached file as study material of a subject.
 
-    Descarga el archivo subido a Open WebUI (identificado por su `file_id`),
-    extrae su texto, lo divide en fragmentos e indexa esos fragmentos en la
-    materia indicada (para que el agente pueda usarlos como contexto RAG al
-    generar preguntas o examenes).
+    Downloads the file uploaded to Open WebUI (identified by its `file_id`),
+    extracts its text, splits it into chunks and indexes those chunks into the
+    given subject (so the agent can use them as RAG context when generating
+    questions or exams).
 
     Args:
-        file_id: id del archivo adjunto en Open WebUI (viene en el tag
-            `<file id="..."/>` del mensaje del usuario).
-        subject_id: id de la materia a la que agregar el material.
-        subject_name: nombre de la materia (para confirmación).
-        clear_previous: si True, reemplaza el material previo de ese archivo.
+        file_id: id of the file attached in Open WebUI (comes in the
+            `<file id="..."/>` tag of the user message).
+        subject_id: id of the subject to add the material to.
+        subject_name: name of the subject (for confirmation).
+        clear_previous: if True, replaces the previous material of that file.
     """
     from core.domain.bank.material import index_text_for_subject
     from exam_app.infrastructure.openwebui_bridge import get_file_metadata, download_file_content
 
-    # 1) Obtener metadata del archivo (nombre, tipo).
+    # 1) Get file metadata (name, type).
     try:
         meta = get_file_metadata(file_id)
     except Exception as e:  # noqa: BLE001
         return (
-            f"❌ No pude acceder al archivo adjunto (id: {file_id}). "
-            f"Detalle: {str(e)[:200]}"
+            f"❌ I could not access the attached file (id: {file_id}). "
+            f"Detail: {str(e)[:200]}"
         )
 
-    filename = meta.get("filename", "archivo")
+    filename = meta.get("filename", "file")
     data = meta.get("data", {}) or {}
-    # Open WebUI ya extrae el contenido textual del archivo en `data.content`.
+    # Open WebUI already extracts the textual content of the file into `data.content`.
     content = data.get("content") or ""
 
-    # 2) Descargar el binario del archivo (para guardarlo físicamente en el
-    #    repositorio de material de la materia).
+    # 2) Download the file binary (to physically store it in the subject's
+    #    material repository).
     raw_bytes: bytes | None = None
     try:
         raw_bytes = download_file_content(file_id)
     except Exception:  # noqa: BLE001
         raw_bytes = None
 
-    # 3) Si Open WebUI no extrajo el contenido, extraerlo del binario.
+    # 3) If Open WebUI did not extract the content, extract it from the binary.
     if not content.strip() and raw_bytes:
         try:
             from core.domain.bank.material import extract_file_text
@@ -852,17 +857,17 @@ def agregar_material_archivo(
             tmp_path.unlink(missing_ok=True)
         except Exception as e:  # noqa: BLE001
             return (
-                f"❌ No pude extraer el contenido del archivo '{filename}'. "
-                f"Detalle: {str(e)[:200]}"
+                f"❌ I could not extract the content of the file '{filename}'. "
+                f"Detail: {str(e)[:200]}"
             )
 
     if not content.strip():
         return (
-            f"⚠️ El archivo '{filename}' no contiene texto extraíble "
-            "(puede ser una imagen escaneada o un formato no soportado)."
+            f"⚠️ The file '{filename}' contains no extractable text "
+            "(it may be a scanned image or an unsupported format)."
         )
 
-    # 4) Guardar el archivo físico en el directorio de material de la materia.
+    # 4) Save the physical file in the subject's material directory.
     saved_path = None
     if raw_bytes:
         try:
@@ -870,9 +875,9 @@ def agregar_material_archivo(
 
             saved_path = save_file_to_subject_folder(raw_bytes, filename, subject_name)
         except Exception as e:  # noqa: BLE001
-            saved_path = None  # no bloquear la indexación si falla el guardado físico
+            saved_path = None  # do not block indexing if the physical save fails
 
-    # 5) Indexar el contenido en la materia (RAG).
+    # 5) Index the content into the subject (RAG).
     try:
         res = index_text_for_subject(
             text=content,
@@ -881,42 +886,42 @@ def agregar_material_archivo(
             clear_previous=clear_previous,
         )
     except Exception as e:  # noqa: BLE001
-        return f"❌ Error al indexar el material: {str(e)[:200]}"
+        return f"❌ Error indexing the material: {str(e)[:200]}"
 
-    if res.get("chunks_guardados", 0) == 0:
-        return f"⚠️ No se pudo indexar el archivo '{filename}': {res.get('mensaje', '')}"
+    if res.get("chunks_saved", 0) == 0:
+        return f"⚠️ Could not index the file '{filename}': {res.get('message', '')}"
 
-    # Evento tipado: toast de progreso/confirmación en el frontend.
+    # Typed event: progress/confirmation toast in the frontend.
     emit_event(
         EventType.MATERIAL_INDEXED,
         {
-            "chunks": res["chunks_guardados"],
+            "chunks": res["chunks_saved"],
             "filename": filename,
             "subject_name": subject_name,
         },
     )
 
-    # Construir la confirmación (incluye si se guardó el archivo físico).
+    # Build the confirmation (includes whether the physical file was saved).
     lines = [
-        f"✅ Material agregado a la materia **{subject_name}**.",
-        f"- Archivo: **{filename}**",
-        f"- Fragmentos indexados: **{res['chunks_guardados']}**",
+        f"✅ Material added to the subject **{subject_name}**.",
+        f"- File: **{filename}**",
+        f"- Indexed chunks: **{res['chunks_saved']}**",
     ]
     if saved_path:
-        lines.append(f"- 📁 Archivo guardado en el repositorio de material: `{saved_path}`")
+        lines.append(f"- 📁 File saved in the material repository: `{saved_path}`")
     else:
-        lines.append("- ⚠️ El archivo físico no se pudo guardar en el repositorio (solo se indexó el texto en la BD).")
-    lines.append("\nEl agente ahora puede usar este material como contexto al generar preguntas o exámenes de la materia.")
+        lines.append("- ⚠️ The physical file could not be saved in the repository (only the text was indexed in the DB).")
+    lines.append("\nThe agent can now use this material as context when generating questions or exams for the subject.")
     return "\n".join(lines)
 
 
-@tool(args_schema=ListarMaterialInput)
-def listar_material_materia(subject_id: str) -> str:
-    """Lista el material de estudio indexado de una materia.
+@tool(args_schema=ListMaterialInput)
+def list_subject_material(subject_id: str) -> str:
+    """Lists the indexed study material of a subject.
 
-    Úsala cuando el profesor pregunte qué material hay disponible para una
-    materia, o para verificar si un archivo quedó indexado. Devuelve los
-    archivos fuente y el número de fragmentos indexados de cada uno.
+    Use it when the professor asks what material is available for a subject,
+    or to verify whether a file was indexed. Returns the source files and the
+    number of indexed chunks of each one.
     """
     from core.infrastructure.db.connection import SessionLocal
     from core.domain.models import Subject, MaterialChunk
@@ -925,7 +930,7 @@ def listar_material_materia(subject_id: str) -> str:
     try:
         subject = db.get(Subject, subject_id)
         if subject is None:
-            return f"No existe la materia con id `{subject_id}`."
+            return f"The subject with id `{subject_id}` does not exist."
 
         rows = (
             db.query(MaterialChunk.source_file, MaterialChunk.subject_id)
@@ -937,50 +942,50 @@ def listar_material_materia(subject_id: str) -> str:
 
     if not rows:
         return (
-            f"La materia **{subject.name}** no tiene material indexado todavía. "
-            "Puedes subir un archivo adjunto al chat y pedirme que lo agregue."
+            f"The subject **{subject.name}** has no indexed material yet. "
+            "You can upload a file attached to the chat and ask me to add it."
         )
 
-    # Agrupar por archivo fuente.
+    # Group by source file.
     from collections import Counter
 
     counts = Counter(source for source, _ in rows)
 
-    lines = [f"📚 Material indexado de **{subject.name}**:\n"]
+    lines = [f"📚 Indexed material of **{subject.name}**:\n"]
     for source, count in sorted(counts.items()):
-        lines.append(f"- **{source}** · {count} fragmento(s)")
-    lines.append("\nEste material se usa como contexto RAG para generar preguntas y exámenes.")
+        lines.append(f"- **{source}** · {count} chunk(s)")
+    lines.append("\nThis material is used as RAG context to generate questions and exams.")
     return "\n".join(lines)
 
 
-@tool(args_schema=RegistrarMateriaInput)
-def registrar_materia(nombre: str) -> str:
-    """Registra una NUEVA materia en el sistema.
+@tool(args_schema=RegisterSubjectInput)
+def register_subject(name: str) -> str:
+    """Registers a NEW subject in the system.
 
-    Úsala cuando el profesor pida registrar una materia que aún no existe
-    (por ejemplo 'registra la materia Economía Aplicada'). Crea la materia
-    y devuelve su id para poder trabajar con ella.
+    Use it when the professor asks to register a subject that does not exist
+    yet (for example 'register the subject Applied Economics'). Creates the
+    subject and returns its id to work with it.
 
     Args:
-        nombre: nombre de la materia a registrar (ej. 'Economía Aplicada').
+        name: name of the subject to register (e.g. 'Applied Economics').
     """
     from core.infrastructure.db.connection import SessionLocal
     from core.domain.models import Subject, MaterialChunk
 
-    nombre = nombre.strip()
-    if not nombre:
-        return "⚠️ Debes indicar el nombre de la materia a registrar."
+    name = name.strip()
+    if not name:
+        return "⚠️ You must provide the name of the subject to register."
 
     db = SessionLocal()
     try:
-        # Evitar duplicados por nombre (case-insensitive).
-        existing = db.query(Subject).filter(Subject.name.ilike(nombre)).first()
+        # Avoid duplicates by name (case-insensitive).
+        existing = db.query(Subject).filter(Subject.name.ilike(name)).first()
         if existing is not None:
             return (
-                f"ℹ️ La materia **{existing.name}** ya está registrada "
-                f"(id: `{existing.id}`). No se creó un duplicado."
+                f"ℹ️ The subject **{existing.name}** is already registered "
+                f"(id: `{existing.id}`). No duplicate was created."
             )
-        subject = Subject(name=nombre)
+        subject = Subject(name=name)
         db.add(subject)
         db.commit()
         db.refresh(subject)
@@ -989,13 +994,10 @@ def registrar_materia(nombre: str) -> str:
             {"subject_id": str(subject.id), "subject_name": subject.name},
         )
         return (
-            f"✅ Materia **{subject.name}** registrada correctamente.\n"
+            f"✅ Subject **{subject.name}** registered successfully.\n"
             f"- Id: `{subject.id}`\n\n"
-            "Ya puedes agregar material de estudio, generar preguntas o armar "
-            "exámenes de esta materia."
+            "You can now add study material, generate questions or build "
+            "exams for this subject."
         )
     finally:
         db.close()
-
-
-

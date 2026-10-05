@@ -1,7 +1,7 @@
-"""Persistencia de resultados del pipeline en la BD.
+"""Persistence of pipeline results into the database.
 
-Guarda los ítems generados (aprobados y rechazados) junto con sus embeddings
-en `generated_questions`, y registra las métricas del examen.
+Saves the generated items (approved and rejected) along with their embeddings
+in `generated_questions`, and records the exam metrics.
 """
 import uuid
 
@@ -18,14 +18,14 @@ def persist_generated_items(
     rejection_log: list,
     total_llm_calls: int,
 ) -> dict:
-    """Guarda los ítems aprobados en `generated_questions` con sus embeddings.
+    """Saves the approved items in `generated_questions` with their embeddings.
 
-    Devuelve un resumen de lo persistido.
+    Returns a summary of what was persisted.
     """
     if not items:
         return {"saved": 0, "subject_id": subject_id}
 
-    # Generar embeddings para todos los ítems aprobados
+    # Generate embeddings for all approved items
     texts = [i.statement for i in items]
     vectors = embedder.embed(texts)
 
@@ -41,7 +41,7 @@ def persist_generated_items(
                 difficulty=item.difficulty.value,
                 question_text=item.statement,
                 embedding=vec,
-                # --- Estructura completa del ítem ---
+                # --- Full item structure ---
                 question_type=item.question_type.value if item.question_type else None,
                 options=(
                     [o.model_dump() for o in item.options]

@@ -1,14 +1,14 @@
-"""Almacén de la pregunta pendiente de guardar (sustituye al global de módulo).
+"""Store of the pending question to save (replaces the module-level global).
 
-Antes: `_PENDING_ITEM` era una variable global en `conversational/tools.py`,
-lo que mezclaba conversaciones concurrentes (todas compartían el mismo
-pendiente) y no sobrevivía a reinicios.
+Before: `_PENDING_ITEM` was a global variable in `conversational/tools.py`,
+which mixed concurrent conversations (all shared the same pending item) and
+did not survive restarts.
 
-Ahora: `PendingItemStore` en memoria, particionado por `thread_id` (igual
-que el EventBus). El estado del grafo (`ConversationalState.pending_item`)
-sigue siendo la fuente de verdad persistida por el checkpointer; este store
-es el puente de lectura/escritura que `_call_tools_node` sincroniza con el
-estado al final de cada turno de tools.
+Now: `PendingItemStore` in memory, partitioned by `thread_id` (like the
+EventBus). The graph state (`ConversationalState.pending_item`) remains the
+source of truth persisted by the checkpointer; this store is the read/write
+bridge that `_call_tools_node` syncs with the state at the end of each tools
+turn.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from typing import Any
 
 @dataclass
 class PendingItem:
-    """Pregunta generada a la espera de confirmación humana."""
+    """Generated question awaiting human confirmation."""
 
     item: dict[str, Any]                 # GeneratedItem serializado
     subject_id: str
@@ -27,7 +27,7 @@ class PendingItem:
 
 
 class PendingItemStore:
-    """Store thread-safe de pendientes por thread_id."""
+    """Thread-safe store of pending items per thread_id."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -46,6 +46,6 @@ class PendingItemStore:
             self._items.pop(thread_id, None)
 
 
-# Singleton compartido por exam-app y agents-backend (misma instancia en
-# el mismo proceso; en despliegue multi-proceso se movería a Redis).
+# Singleton shared by exam-app and agents-backend (same instance in the same
+# process; in multi-process deployment it would move to Redis).
 pending_store = PendingItemStore()

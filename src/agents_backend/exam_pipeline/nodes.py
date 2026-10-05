@@ -1,8 +1,8 @@
-"""Implementación de los nodos del grafo LangGraph.
+"""Implementation of the LangGraph graph nodes.
 
-Cada función recibe el estado completo y devuelve un dict parcial que
-LangGraph mezcla con el estado (los campos con reducer `operator.add`
-se concatenan; el resto se sobreescribe).
+Each function receives the full state and returns a partial dict that
+LangGraph merges into the state (fields with the `operator.add` reducer
+are concatenated; the rest are overwritten).
 """
 import random
 from typing import Any
@@ -30,7 +30,7 @@ from core.infrastructure.latex.utils import render_exam
 # Helpers
 # ---------------------------------------------------------------------------
 def _weighted_sample(weights: dict, n: int) -> list:
-    """Muestrea `n` ítems a partir de un dict {clave: peso} (no-normalizado)."""
+    """Samples `n` items from a {key: weight} dict (non-normalized)."""
     keys = list(weights.keys())
     probs = [weights[k] for k in keys]
     return random.choices(keys, weights=probs, k=n)
@@ -53,7 +53,7 @@ def _extract_error_excerpt(e: Exception) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Extracción de texto por tipo de archivo (para el Ingestor)
+# Text extraction per file type (for the Ingestor)
 # ---------------------------------------------------------------------------
 def _extract_pdf(path: str) -> str:
     """Extrae texto de un PDF con PyMuPDF."""
@@ -70,7 +70,7 @@ def _extract_pdf(path: str) -> str:
 
 
 def _extract_docx(path: str) -> str:
-    """Extrae texto de un .docx (párrafos + tablas)."""
+    """Extracts text from a .docx (paragraphs + tables)."""
     from docx import Document
 
     doc = Document(path)
@@ -108,7 +108,7 @@ def _extract_pptx(path: str) -> str:
 
 
 def _extract_xlsx(path: str) -> str:
-    """Extrae texto de un .xlsx (todas las hojas, celdas no vacías)."""
+    """Extracts text from a .xlsx (all sheets, non-empty cells)."""
     from openpyxl import load_workbook
 
     wb = load_workbook(path, read_only=True, data_only=True)
@@ -135,11 +135,11 @@ def _extract_text_file(path: str) -> str:
 # 1. Ingestor
 # ---------------------------------------------------------------------------
 def ingestor_node(state: dict) -> dict:
-    """Lee los materiales crudos y produce un resumen del syllabus.
+    """Reads the raw materials and produces a syllabus summary.
 
-    Para el MVP no llama al LLM: extrae texto de PDFs, DOCX, PPTX, XLSX y
-    archivos de texto, y construye un resumen básico. (El indexado vectorial
-    completo es una fase posterior.)
+    For the MVP it doesn't call the LLM: extracts text from PDFs, DOCX, PPTX,
+    XLSX and text files, and builds a basic summary. (Full vector indexing is
+    a later phase.)
     """
     raw_paths = state.get("raw_materials_paths", [])
     chunks_count = 0
@@ -167,15 +167,15 @@ def ingestor_node(state: dict) -> dict:
 
             if content.strip():
                 fragments.append(content.strip())
-                # Heurística de chunking: ~1 chunk por ~2000 caracteres
+                # Chunking heuristic: ~1 chunk per ~2000 characters
                 chunks_count += max(1, len(content) // 2000)
                 processed.append(path)
         except Exception as e:  # noqa: BLE001
             failed.append(path)
-            fragments.append(f"[No se pudo leer {path}: {_extract_error_excerpt(e)}]")
+            fragments.append(f"[Could not read {path}: {_extract_error_excerpt(e)}]")
 
     syllabus_summary = (
-        "\n\n".join(fragments)[:6000] if fragments else "Sin materiales cargados."
+        "\n\n".join(fragments)[:6000] if fragments else "No materials loaded."
     )
     return {
         "syllabus_summary": syllabus_summary,
@@ -189,11 +189,11 @@ def ingestor_node(state: dict) -> dict:
 # 2. Planificador
 # ---------------------------------------------------------------------------
 def planner_node(state: dict) -> dict:
-    """Descompone el blueprint del examen en una lista explícita de `ItemSpec`.
+    """Breaks the exam blueprint into an explicit list of `ItemSpec`.
 
-    Se hace programáticamente (muestreo ponderado de las distribuciones),
-    sin gastar una llamada al LLM: más barato, determinista y fácil de
-    defender como metodología en la tesis.
+    Done programmatically (weighted sampling of the distributions), without
+    spending an LLM call: cheaper, deterministic and easier to defend as
+    methodology in the thesis.
     """
     blueprint: ExamBlueprint = state["blueprint"]
     total = blueprint.total_questions
@@ -210,18 +210,18 @@ def planner_node(state: dict) -> dict:
     for bloom, n_bloom in bloom_counts.items():
         for _ in range(n_bloom):
             topic = topics[spec_index % len(topics)] if topics else "general"
-            # Distribución de dificultad dentro del nivel de Bloom actual.
+            # Difficulty distribution within the current Bloom level.
             difficulty = _weighted_sample(diff_counts, 1)[0]
-            # Tipo de pregunta: los niveles bajos favorecen opción múltiple.
-            if bloom in (BloomLevel.RECORDAR, BloomLevel.COMPRENDER):
+            # Question type: lower Bloom levels favor multiple choice.
+            if bloom in (BloomLevel.REMEMBER, BloomLevel.UNDERSTAND):
                 qtype = random.choice(
-                    [QuestionType.OPCION_MULTIPLE, QuestionType.VERDADERO_FALSO]
+                    [QuestionType.MULTIPLE_CHOICE, QuestionType.TRUE_FALSE]
                 )
-            elif bloom == BloomLevel.CREAR:
-                qtype = QuestionType.DESARROLLO
+            elif bloom == BloomLevel.CREATE:
+                qtype = QuestionType.ESSAY
             else:
                 qtype = random.choice(
-                    [QuestionType.OPCION_MULTIPLE, QuestionType.RESPUESTA_CORTA, QuestionType.DESARROLLO]
+                    [QuestionType.MULTIPLE_CHOICE, QuestionType.SHORT_ANSWER, QuestionType.ESSAY]
                 )
             pending.append(
                 ItemSpec(
@@ -241,20 +241,21 @@ def planner_node(state: dict) -> dict:
 # 3. Generador
 # ---------------------------------------------------------------------------
 def generator_node(state: dict) -> dict:
-    """Toma el siguiente spec pendiente y genera un `GeneratedItem` con el LLM."""
+    """Takes the next pending spec and generates a `GeneratedItem` with the LLM."""
     if not state.get("pending_specs"):
         return {}
 
     spec: ItemSpec = state["pending_specs"][0]
     remaining = state["pending_specs"][1:]
 
-    # Configuración RAG desde el blueprint (retrieval config)
+    # RAG config from the blueprint (retrieval config)
     blueprint: ExamBlueprint = state["blueprint"]
     retrieval_cfg = blueprint.retrieval
 
-    # RAG: recuperar chunks relevantes al tema del spec desde la BD (pgvector).
-    # Si la materia está indexada, usamos los fragmentos más relevantes en vez
-    # del resumen estático. Si no hay chunks, caemos al resumen del syllabus.
+    # RAG: retrieve chunks relevant to the spec topic from the DB (pgvector).
+    # If the subject is indexed, use the most relevant fragments instead of
+    # the static summary. If there are no chunks, fall back to the syllabus
+    # summary.
     context = ""
     if retrieval_cfg.use_rag:
         try:
@@ -270,26 +271,26 @@ def generator_node(state: dict) -> dict:
             context = ""
 
     if not context:
-        context = f"Contexto del syllabus (fragmento):\n{state.get('syllabus_summary', '')[:4000]}"
+        context = f"Syllabus context (chunk):\n{state.get('syllabus_summary', '')[:4000]}"
 
     prompt = (
-        "Eres un generador de ítems de examen universitario. Genera UNA pregunta "
-        "que cumpla exactamente esta especificación:\n"
-        f"- Tema: {spec.topic}\n"
-        f"- Subtema: {spec.subtopic or 'no especificado'}\n"
-        f"- Nivel de Bloom: {spec.bloom_level.value}\n"
-        f"- Dificultad: {spec.difficulty.value}\n"
-        f"- Tipo de pregunta: {spec.question_type.value}\n"
-        f"- Puntaje: {spec.points}\n\n"
+        "You are a university exam item generator. Generate ONE question "
+        "that exactly complies with this specification:\n"
+        f"- Topic: {spec.topic}\n"
+        f"- Subtopic: {spec.subtopic or 'not specified'}\n"
+        f"- Bloom level: {spec.bloom_level.value}\n"
+        f"- Difficulty: {spec.difficulty.value}\n"
+        f"- Question type: {spec.question_type.value}\n"
+        f"- Points: {spec.points}\n\n"
         f"{context}\n\n"
-        "Devuelve solo la estructura solicitada."
+        "Return only the requested structure."
     )
 
     try:
         structured = generator_llm.with_structured_output(GeneratedItem)
         item = structured.invoke(prompt)
     except Exception as e:  # noqa: BLE001
-        # Si el LLM falla, registramos el fallo como rechazo y avanzamos.
+        # If the LLM fails, log the failure as a rejection and move on.
         return {
             "current_spec": spec,
             "pending_specs": remaining,
@@ -317,8 +318,8 @@ def generator_node(state: dict) -> dict:
 def _semantic_similarity(a: str, b: str) -> float:
     """Similitud aproximada por solapamiento de tokens (placeholder).
 
-    El MVP usa una heurística simple; la similitud por embeddings
-    (pgvector) es una mejora posterior para el capítulo de experimentación.
+    The MVP uses a simple heuristic; embedding similarity (pgvector) is a
+    later improvement for the experimentation chapter.
     """
     a_tokens = set(a.lower().split())
     b_tokens = set(b.lower().split())
@@ -328,29 +329,29 @@ def _semantic_similarity(a: str, b: str) -> float:
 
 
 def evaluator_node(state: dict) -> dict:
-    """Evalúa el ítem generado: calidad, coincidencia de dificultad y duplicación."""
+    """Evaluates the generated item: quality, difficulty match and duplication."""
     item: GeneratedItem | None = state.get("current_item")
     if item is None:
         return {}
 
     spec: ItemSpec = state["current_spec"]
 
-    # 1) Chequeo de duplicación contra ítems ya aprobados.
+    # 1) Duplicate check against already approved items.
     max_sim = 0.0
     for approved in state.get("approved_items", []):
         sim = _semantic_similarity(item.statement, approved.statement)
         max_sim = max(max_sim, sim)
     is_duplicate = max_sim >= settings.dedup_similarity_threshold
 
-    # 2) Evaluación de calidad con el LLM.
+    # 2) Quality evaluation with the LLM.
     prompt = (
-        "Eres un evaluador riguroso de ítems de examen. Evalúa la pregunta "
-        "siguiente y responde con la estructura solicitada.\n\n"
-        f"Especificación pedida:\n- Tema: {spec.topic}\n"
-        f"- Nivel de Bloom: {spec.bloom_level.value}\n"
-        f"- Dificultad: {spec.difficulty.value}\n"
-        f"- Tipo: {spec.question_type.value}\n\n"
-        f"Ítem generado:\n{item.model_dump_json()}"
+        "You are a rigorous exam item evaluator. Evaluate the following "
+        "question and respond with the requested structure.\n\n"
+        f"Requested specification:\n- Topic: {spec.topic}\n"
+        f"- Bloom level: {spec.bloom_level.value}\n"
+        f"- Difficulty: {spec.difficulty.value}\n"
+        f"- Type: {spec.question_type.value}\n\n"
+        f"Generated item:\n{item.model_dump_json()}"
     )
     try:
         structured = evaluator_llm.with_structured_output(EvaluationResult)
@@ -363,7 +364,7 @@ def evaluator_node(state: dict) -> dict:
             rejection_reason=f"evaluation_error: {_extract_error_excerpt(e)}",
         )
 
-    # 3) Combinar: la duplicación anula cualquier aprobación.
+    # 3) Combine: duplication overrides any approval.
     if is_duplicate:
         result.approved = False
         result.is_duplicate = True
@@ -380,11 +381,12 @@ def evaluator_node(state: dict) -> dict:
 # 5. Ensamblador
 # ---------------------------------------------------------------------------
 def assembler_node(state: dict) -> dict:
-    """Arma el `CompiledExam` y genera el LaTeX final.
+    """Assembles the `CompiledExam` and generates the final LaTeX.
 
-    Si el blueprint pide varias versiones (`metadata` con `num_versions`),
-    genera múltiples fuentes LaTeX (preguntas y opciones barajadas, estilo
-    AMC anti-copia). Si no, genera una sola versión (comportamiento previo).
+    If the blueprint requests multiple versions (`metadata` with
+    `num_versions`), generates multiple LaTeX sources (shuffled questions and
+    options, AMC anti-copy style). Otherwise, generates a single version
+    (previous behavior).
     """
     blueprint: ExamBlueprint = state["blueprint"]
     items: list[GeneratedItem] = state.get("approved_items", [])
@@ -395,20 +397,20 @@ def assembler_node(state: dict) -> dict:
         items=items,
     )
 
-    # Nº de versiones desde el blueprint (default 1).
+    # Number of versions from the blueprint (default 1).
     num_versions = getattr(blueprint.metadata, "num_versions", 1) or 1
 
     rendered = render_exam(
         exam,
         state["template_id"],
         state["subject_name"],
-        instructions=blueprint.metadata.instructions or "Responda todas las preguntas en el espacio indicado.",
+        instructions=blueprint.metadata.instructions or "Answer all questions in the space provided.",
         duration_minutes=blueprint.estimated_duration_minutes,
         print_answers=True,
         num_versions=num_versions,
     )
 
-    # Normalizar a lista (render_exam devuelve str si num_versions<=1).
+    # Normalize to a list (render_exam returns str if num_versions<=1).
     if isinstance(rendered, str):
         latex_sources = [rendered]
     else:
@@ -416,7 +418,7 @@ def assembler_node(state: dict) -> dict:
 
     return {
         "compiled_exam": exam,
-        "latex_source": latex_sources[0],          # compatibilidad: primera versión
+        "latex_source": latex_sources[0],          # compatibility: first version
         "latex_sources": latex_sources,            # todas las versiones
     }
 
@@ -425,11 +427,11 @@ def assembler_node(state: dict) -> dict:
 # 6. Compilador LaTeX
 # ---------------------------------------------------------------------------
 def compiler_node(state: dict) -> dict:
-    """Envía el LaTeX al microservicio compilador y guarda el PDF resultante.
+    """Sends the LaTeX to the compiler microservice and saves the resulting PDF.
 
-    Si hay varias versiones (`latex_sources`), compila cada una y devuelve
-    una lista de rutas de PDFs (`pdf_paths`). Si no, compila la única
-    versión (comportamiento previo con `pdf_path`).
+    If there are multiple versions (`latex_sources`), compiles each one and
+    returns a list of PDF paths (`pdf_paths`). Otherwise, compiles the single
+    version (previous behavior with `pdf_path`).
     """
     latex_sources = state.get("latex_sources") or []
     if not latex_sources:
@@ -439,7 +441,7 @@ def compiler_node(state: dict) -> dict:
         else:
             return {
                 "status": "failed",
-                "error_message": "No hay latex_source para compilar",
+                "error_message": "There is no latex_source to compile",
             }
 
     compilation_attempts = state.get("compilation_attempts", 0) + 1
@@ -468,7 +470,7 @@ def compiler_node(state: dict) -> dict:
             all_success = False
             logs.append({"attempt_number": compilation_attempts, "version": idx + 1, "success": False, "error_excerpt": _extract_error_excerpt(e)})
 
-    # Actualizar el CompiledExam con las rutas de los PDFs.
+    # Update the CompiledExam with the PDF paths.
     exam = state.get("compiled_exam")
     if exam is not None and pdf_paths:
         exam = exam.model_copy(
@@ -487,8 +489,8 @@ def compiler_node(state: dict) -> dict:
         update["status"] = "completed"
     elif compilation_attempts >= settings.max_compilation_attempts:
         update["status"] = "failed"
-        update["error_message"] = "Alguna versión del examen no compiló."
+        update["error_message"] = "Some version of the exam did not compile."
     else:
         update["status"] = "in_progress"
-        update["error_message"] = "Alguna versión del examen no compiló."
+        update["error_message"] = "Some version of the exam did not compile."
     return update

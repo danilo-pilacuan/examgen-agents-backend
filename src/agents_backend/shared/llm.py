@@ -1,7 +1,7 @@
-"""Factory de LLM: apunta a la infraestructura local (OpenAI-compatible).
+"""LLM factory: points to the local infrastructure (OpenAI-compatible).
 
-El pipeline es agnóstico al proveedor: basta con cambiar `llm_base_url`
-en `.env` para usar OpenAI real u otro endpoint compatible.
+The pipeline is provider-agnostic: just change `llm_base_url` in `.env` to
+use real OpenAI or another compatible endpoint.
 """
 from langchain_openai import ChatOpenAI
 
@@ -12,12 +12,12 @@ def get_llm(
     reasoning_effort: str = "low",
     temperature: float | None = None,
 ) -> ChatOpenAI:
-    """Devuelve un ChatOpenAI apuntando a la infra local.
+    """Returns a ChatOpenAI pointing to the local infrastructure.
 
-    `reasoning_effort` controla la deliberación del modelo. El servidor vLLM
-    soporta 7 niveles: none | minimal | low | medium | high | xhigh | max.
-    El Generador usa `none` (JSON en content); el Evaluador usa `none`
-    con temperatura baja (juicio determinista y JSON válido).
+    `reasoning_effort` controls the model's deliberation. The vLLM server
+    supports 7 levels: none | minimal | low | medium | high | xhigh | max.
+    The Generator uses `none` (JSON in content); the Evaluator uses `none`
+    with low temperature (deterministic judgment and valid JSON).
     """
     return ChatOpenAI(
         model=settings.llm_model,
@@ -29,10 +29,10 @@ def get_llm(
     )
 
 
-# Instancias con el nivel de razonamiento apropiado para cada nodo.
-# NOTA: ambos usan `none` porque usan with_structured_output. Con
-# reasoning_effort > none, vLLM pone el razonamiento en `reasoning` y deja
-# `content` vacío, rompiendo el JSON estructurado.
+# Instances with the reasoning level appropriate for each node.
+# NOTE: both use `none` because they use with_structured_output. With
+# reasoning_effort > none, vLLM puts the reasoning in `reasoning` and leaves
+# `content` empty, breaking the structured JSON.
 generator_llm = get_llm(settings.llm_reasoning_generator)
 evaluator_llm = get_llm(
     settings.llm_reasoning_evaluator,
