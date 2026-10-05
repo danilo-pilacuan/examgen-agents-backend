@@ -124,7 +124,25 @@ def _call_tools_node(state: ConversationalState) -> dict:
             content = f"❌ Error al ejecutar {name}: {str(e)[:200]}"
         results.append(ToolMessage(content=content, tool_call_id=tool_id))
 
-    return {"messages": results}
+    # Sincronizar el pendiente del store con el estado del grafo: el
+    # checkpointer persiste `pending_item`/`pending_subject_id` por thread
+    # (sustituye al antiguo global de módulo `_PENDING_ITEM`).
+    from agents_backend.shared.events import get_current_thread_id
+    from agents_backend.shared.pending import pending_store
+
+    tid = get_current_thread_id()
+    pending = pending_store.get(tid) if tid else None
+    if pending is not None:
+        return {
+            "messages": results,
+            "pending_item": pending.item,
+            "pending_subject_id": pending.subject_id,
+        }
+    return {
+        "messages": results,
+        "pending_item": None,
+        "pending_subject_id": None,
+    }
 
 
 def _build_postgres_checkpointer():

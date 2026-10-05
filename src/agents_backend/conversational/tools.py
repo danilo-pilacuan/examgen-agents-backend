@@ -20,6 +20,8 @@ from langchain_core.tools import tool
 
 from agents_backend.shared.llm import generator_llm
 from agents_backend.shared.retrieval import retrieve_chunks, format_context
+from agents_backend.shared.events import emit_event, EventType
+from agents_backend.shared.pending import pending_store, PendingItem
 from core.domain.bank import service as bank
 from core.domain.schemas.exam import GeneratedItem, RetrievalConfig
 from core.domain.schemas.tools import (
@@ -45,23 +47,34 @@ _OFF_TOPIC_KEYWORDS = [
     "chisme", "política general", "clima", "viaje", "música", "videojuego",
 ]
 
-# Ítem pendiente de guardar (generado pero aún no persistido). Lo rellena
-# `generar_pregunta` y lo consume `guardar_pregunta_pendiente`. Es un puente
-# porque las tools de LangGraph no reciben el estado directamente.
-_PENDING_ITEM: dict | None = None
-_PENDING_SUBJECT_ID: str | None = None
+# Ítem pendiente de guardar: store particionado por thread_id (ver
+# agents_backend/shared/pending.py). Lo rellena `generar_pregunta` y lo
+# consume `guardar_pregunta_pendiente`; `_call_tools_node` lo sincroniza con
+# ConversationalState.pending_item para que el checkpointer lo persista.
+def get_pending_item(thread_id: str | None = None) -> tuple[dict | None, str | None]:
+    """Devuelve (item_pendiente, subject_id) del thread actual (o el dado)."""
+    tid = thread_id or _current_thread()
+    pending = pending_store.get(tid) if tid else None
+    if pending is None:
+        return None, None
+    return pending.item, pending.subject_id
 
 
-def get_pending_item() -> tuple[dict | None, str | None]:
-    """Devuelve (item_pendiente, subject_id)."""
-    return _PENDING_ITEM, _PENDING_SUBJECT_ID
+def set_pending_item(item: dict | None, subject_id: str | None, thread_id: str | None = None) -> None:
+    """Guarda (o limpia) el ítem pendiente del thread actual (o el dado)."""
+    tid = thread_id or _current_thread()
+    if tid is None:
+        return
+    if item is None:
+        pending_store.clear(tid)
+        return
+    pending_store.set(tid, PendingItem(item=item, subject_id=subject_id or ""))
 
 
-def set_pending_item(item: dict | None, subject_id: str | None) -> None:
-    """Guarda el ítem pendiente para que `guardar_pregunta_pendiente` lo use."""
-    global _PENDING_ITEM, _PENDING_SUBJECT_ID
-    _PENDING_ITEM = item
-    _PENDING_SUBJECT_ID = subject_id
+def _current_thread() -> str | None:
+    """thread_id del turno actual según el contexto de eventos."""
+    from agents_backend.shared.events import get_current_thread_id
+    return get_current_thread_id()
 
 
 def _validate_exam_topic(topic: str) -> str | None:
@@ -179,6 +192,34 @@ def buscar_preguntas(
         table_columns = list(DEFAULT_TABLE_COLUMNS)
 
     table = _render_questions_table(questions, table_columns)
+
+    # Evento tipado para la tabla interactiva del frontend.
+    emit_event(
+        EventType.QUESTIONS_LISTED,
+        {
+            "questions": [
+                {
+                    "id": str(q.id),
+                    "topic": q.topic,
+                    "subtopic": q.subtopic,
+                    "bloom_level": q.bloom_level,
+                    "difficulty": q.difficulty,
+                    "question_type": q.question_type,
+                    "question_text": q.question_text,
+                    "options": q.options,
+                    "expected_answer": q.expected_answer,
+                    "solution_explanation": q.solution_explanation,
+                    "points": q.points,
+                    "verified_by_human": q.verified_by_human,
+                    "verified_by_ai": q.verified_by_ai,
+                    "ai_review_priority": q.ai_review_priority,
+                }
+                for q in questions
+            ],
+            "total": len(questions),
+        },
+    )
+
     return f"📚 Encontré {len(questions)} pregunta(s) del banco:\n\n{table}"
 
 
@@ -230,6 +271,9 @@ def generar_pregunta(
     # Guardar el ítem pendiente para que, al confirmar, `guardar_pregunta_pendiente`
     # lo persista sin que el LLM tenga que re-especificar todos los datos.
     set_pending_item(item.model_dump(), subject_id)
+
+    # Evento tipado para el widget de pregunta del frontend (HITL).
+    emit_event(EventType.QUESTION_GENERATED, {"question": item.model_dump()})
 
     # No se guarda aún: se devuelve para revisión humana (HITL).
     return (
@@ -304,6 +348,13 @@ def guardar_pregunta(
         if review.notes
         else ""
     )
+
+    # Evento tipado: pregunta guardada (el frontend actualiza el banco).
+    emit_event(
+        EventType.QUESTION_SAVED,
+        {"question_id": str(q.id), "verified_by_human": False},
+    )
+
     return (
         f"✅ Pregunta guardada en el banco (id: {q.id}).{review_note}\n"
         "Aún NO está marcada como verificada por humano. "
@@ -400,15 +451,27 @@ def guardar_pregunta_pendiente(verificar_humano: bool = False) -> str:
         try:
             bank.set_human_verification(q.id, verified=True)
         except Exception as e:  # noqa: BLE001
+            emit_event(
+                EventType.QUESTION_SAVED,
+                {"question_id": str(q.id), "verified_by_human": False},
+            )
             return (
                 f"✅ Pregunta guardada (id: {q.id}).{review_note}\n"
                 f"⚠️ No se pudo marcar como verificada: {str(e)[:120]}"
             )
+        emit_event(
+            EventType.QUESTION_SAVED,
+            {"question_id": str(q.id), "verified_by_human": True},
+        )
         return (
             f"✅ Pregunta guardada y **verificada por humano** (id: {q.id}).{review_note}\n"
             "A partir de ahora no podrá ser modificada por el agente."
         )
 
+    emit_event(
+        EventType.QUESTION_SAVED,
+        {"question_id": str(q.id), "verified_by_human": False},
+    )
     return (
         f"✅ Pregunta guardada en el banco (id: {q.id}).{review_note}\n"
         "Aún NO está marcada como verificada por humano. "
@@ -523,6 +586,18 @@ def generar_examen_pdf(
         return (
             "No se pudo compilar el PDF del examen. "
             f"Status: {result.get('status')} · Error: {result.get('error_message', 'desconocido')}"
+        )
+
+    # Eventos tipados: un artifact_ready por cada versión del PDF.
+    for i, p in enumerate(pdf_paths):
+        emit_event(
+            EventType.ARTIFACT_READY,
+            {
+                "kind": "pdf",
+                "url": f"/output/{Path(p).name}",
+                "filename": Path(p).name,
+                "version": i + 1,
+            },
         )
 
     # Subir cada PDF a Open WebUI como adjunto nativo del chat.
@@ -687,6 +762,16 @@ def exportar_preguntas(
     except Exception as e:  # noqa: BLE001
         return f"❌ No pude generar el archivo de exportación: {str(e)[:200]}"
 
+    # Evento tipado: card de artefacto descargable en el frontend.
+    emit_event(
+        EventType.ARTIFACT_READY,
+        {
+            "kind": "xlsx" if fmt == "xlsx" else "csv",
+            "url": f"/output/{out_path.name}",
+            "filename": out_path.name,
+        },
+    )
+
     # Subir el archivo a Open WebUI como adjunto nativo del chat.
     try:
         upload = upload_file_to_openwebui(out_path, mime_type=mime)
@@ -801,6 +886,16 @@ def agregar_material_archivo(
     if res.get("chunks_guardados", 0) == 0:
         return f"⚠️ No se pudo indexar el archivo '{filename}': {res.get('mensaje', '')}"
 
+    # Evento tipado: toast de progreso/confirmación en el frontend.
+    emit_event(
+        EventType.MATERIAL_INDEXED,
+        {
+            "chunks": res["chunks_guardados"],
+            "filename": filename,
+            "subject_name": subject_name,
+        },
+    )
+
     # Construir la confirmación (incluye si se guardó el archivo físico).
     lines = [
         f"✅ Material agregado a la materia **{subject_name}**.",
@@ -889,6 +984,10 @@ def registrar_materia(nombre: str) -> str:
         db.add(subject)
         db.commit()
         db.refresh(subject)
+        emit_event(
+            EventType.SUBJECT_REGISTERED,
+            {"subject_id": str(subject.id), "subject_name": subject.name},
+        )
         return (
             f"✅ Materia **{subject.name}** registrada correctamente.\n"
             f"- Id: `{subject.id}`\n\n"
