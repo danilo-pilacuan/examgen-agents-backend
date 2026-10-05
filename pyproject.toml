@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mvp-agents-backend"
+version = "0.1.0"
+description = "Motor LangGraph: exam_pipeline + conversational + shared"
+requires-python = ">=3.11"
+dependencies = [
+    "mvp-core",
+    "langgraph>=1.2.0,<2.0.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
+    "langchain>=1.0.0,<2.0.0",
+    "langchain-openai>=0.3.0",
+    "langchain-postgres>=0.0.12",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+mvp-core = { path = "../../libs/core", editable = true }
