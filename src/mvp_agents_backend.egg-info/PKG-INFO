@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: mvp-agents-backend
+Version: 0.1.0
+Summary: Motor LangGraph: exam_pipeline + conversational + shared
+Requires-Python: >=3.11
+Requires-Dist: mvp-core
+Requires-Dist: langgraph<2.0.0,>=1.2.0
+Requires-Dist: langgraph-checkpoint-postgres>=2.0.0
+Requires-Dist: langchain<2.0.0,>=1.0.0
+Requires-Dist: langchain-openai>=0.3.0
+Requires-Dist: langchain-postgres>=0.0.12

@@ -1,0 +1,6 @@
+mvp-core
+langgraph<2.0.0,>=1.2.0
+langgraph-checkpoint-postgres>=2.0.0
+langchain<2.0.0,>=1.0.0
+langchain-openai>=0.3.0
+langchain-postgres>=0.0.12

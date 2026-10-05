@@ -20,4 +20,4 @@ dependencies = [
 where = ["src"]
 
 [tool.uv.sources]
-mvp-core = { path = "../../libs/core", editable = true }
+mvp-core = { path = "../core", editable = true }
