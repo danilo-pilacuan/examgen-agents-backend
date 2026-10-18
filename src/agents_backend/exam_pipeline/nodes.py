@@ -37,9 +37,9 @@ def _weighted_sample(weights: dict, n: int) -> list:
 
 
 def _distribute(weights: dict, total: int) -> dict:
-    """Convierte proporciones (suman ~1) en conteos enteros que suman `total`."""
+    """Converts proportions (summing ~1) into integer counts summing `total`."""
     counts = {k: int(round(w * total)) for k, w in weights.items()}
-    # Corrige el error de redondeo para que sumen exactamente `total`.
+    # Fix the rounding error so they sum exactly `total`.
     diff = total - sum(counts.values())
     if diff != 0:
         keys = sorted(counts, key=lambda k: counts[k], reverse=True)
@@ -56,7 +56,7 @@ def _extract_error_excerpt(e: Exception) -> str:
 # Text extraction per file type (for the Ingestor)
 # ---------------------------------------------------------------------------
 def _extract_pdf(path: str) -> str:
-    """Extrae texto de un PDF con PyMuPDF."""
+    """Extracts text from a PDF with PyMuPDF."""
     import fitz  # pymupdf
 
     doc = fitz.open(path)
@@ -84,7 +84,7 @@ def _extract_docx(path: str) -> str:
 
 
 def _extract_pptx(path: str) -> str:
-    """Extrae texto de un .pptx (texto de cada shape en cada slide)."""
+    """Extracts text from a .pptx (text of each shape in each slide)."""
     from pptx import Presentation
 
     prs = Presentation(path)
@@ -114,7 +114,7 @@ def _extract_xlsx(path: str) -> str:
     wb = load_workbook(path, read_only=True, data_only=True)
     parts = []
     for ws in wb.worksheets:
-        sheet_parts = [f"--- Hoja: {ws.title} ---"]
+        sheet_parts = [f"--- Sheet: {ws.title} ---"]
         for row in ws.iter_rows(values_only=True):
             cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
             if cells:
@@ -126,7 +126,7 @@ def _extract_xlsx(path: str) -> str:
 
 
 def _extract_text_file(path: str) -> str:
-    """Extrae texto de un archivo de texto plano (.txt, .md, etc.)."""
+    """Extracts text from a plain text file (.txt, .md, etc.)."""
     with open(path, encoding="utf-8", errors="ignore") as f:
         return f.read().strip()
 
@@ -162,7 +162,7 @@ def ingestor_node(state: dict) -> dict:
             elif ext in ("txt", "md", "csv"):
                 content = _extract_text_file(path)
             else:
-                # Formato desconocido: intentar como texto plano.
+                # Unknown format: try as plain text.
                 content = _extract_text_file(path)
 
             if content.strip():
@@ -198,7 +198,7 @@ def planner_node(state: dict) -> dict:
     blueprint: ExamBlueprint = state["blueprint"]
     total = blueprint.total_questions
 
-    # Conteos por nivel de Bloom, dificultad y tema.
+    # Counts per Bloom level, difficulty and topic.
     bloom_counts = _distribute(blueprint.bloom_distribution, total)
     diff_counts = _distribute(blueprint.difficulty_distribution, total)
     topic_counts = _distribute(blueprint.topics_weight, total)
@@ -316,7 +316,7 @@ def generator_node(state: dict) -> dict:
 # 4. Evaluador
 # ---------------------------------------------------------------------------
 def _semantic_similarity(a: str, b: str) -> float:
-    """Similitud aproximada por solapamiento de tokens (placeholder).
+    """Approximate similarity by token overlap (placeholder).
 
     The MVP uses a simple heuristic; embedding similarity (pgvector) is a
     later improvement for the experimentation chapter.
@@ -419,12 +419,12 @@ def assembler_node(state: dict) -> dict:
     return {
         "compiled_exam": exam,
         "latex_source": latex_sources[0],          # compatibility: first version
-        "latex_sources": latex_sources,            # todas las versiones
+        "latex_sources": latex_sources,            # all versions
     }
 
 
 # ---------------------------------------------------------------------------
-# 6. Compilador LaTeX
+# 6. LaTeX compiler
 # ---------------------------------------------------------------------------
 def compiler_node(state: dict) -> dict:
     """Sends the LaTeX to the compiler microservice and saves the resulting PDF.

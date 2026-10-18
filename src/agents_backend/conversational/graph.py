@@ -59,13 +59,13 @@ WRITE_TOOLS = {"save_question", "save_pending_question", "confirm_human_verifica
 
 
 def _make_llm():
-    """LLM del agente conversacional con las tools vinculadas.
+    """Conversational agent LLM with the tools bound.
 
-    IMPORTANTE: se usa `reasoning_effort="low"` (config `llm_reasoning_chat`).
-    GLM-5.3-Flash es un modelo de razonamiento con comportamiento INVERSO a
-    DeepSeek: con `none` escribe su razonamiento directamente en `content`
-    (respuestas del chat "ensuciadas"); con `low` el contenido sale limpio.
-    Verificado con el servidor vLLM local.
+    IMPORTANT: `reasoning_effort="low"` is used (config `llm_reasoning_chat`).
+    GLM-5.3-Flash is a reasoning model with behavior INVERSE to DeepSeek:
+    with `none` it writes its reasoning directly into `content` (chat
+    responses get "dirty"); with `low` the content comes out clean.
+    Verified against the local vLLM server.
     """
     llm = get_llm(
         reasoning_effort=settings.llm_reasoning_chat,
@@ -75,7 +75,7 @@ def _make_llm():
 
 
 def _assistant_node(state: ConversationalState) -> dict:
-    """Nodo principal: el LLM decide responder o llamar a una tool."""
+    """Main node: the LLM decides to answer or call a tool."""
     llm = _make_llm()
     response = llm.invoke(
         [{"role": "system", "content": SYSTEM_PROMPT}] + state["messages"]
@@ -101,7 +101,7 @@ def _call_tools_node(state: ConversationalState) -> dict:
         args = tool_call.get("args", {})
         tool_id = tool_call["id"]
 
-        # Ejecutar la tool (lectura o escritura).
+        # Run the tool (read or write).
         tool = TOOL_BY_NAME.get(name)
         if tool is None:
             results.append(ToolMessage(content=f"❌ Unknown tool: {name}", tool_call_id=tool_id))
@@ -109,9 +109,9 @@ def _call_tools_node(state: ConversationalState) -> dict:
         try:
             content = tool.invoke(args)
         except ValidationError as e:
-            # Los args del LLM no cumplen el args_schema (Pydantic) de la tool.
-            # Se devuelve un mensaje accionable para que el LLM corrija los
-            # argumentos y reintente (no crashea el grafo).
+            # The LLM args do not satisfy the tool's args_schema (Pydantic).
+            # An actionable message is returned so the LLM fixes the
+            # arguments and retries (the graph does not crash).
             errors = "; ".join(
                 f"{'.'.join(str(p) for p in err.get('loc', []))}: {err.get('msg', '')}"
                 for err in e.errors()[:5]
@@ -124,8 +124,8 @@ def _call_tools_node(state: ConversationalState) -> dict:
             content = f"❌ Error executing {name}: {str(e)[:200]}"
         results.append(ToolMessage(content=content, tool_call_id=tool_id))
 
-    # Sincronizar el pendiente del store con el estado del grafo: el
-    # checkpointer persiste `pending_item`/`pending_subject_id` por thread
+    # Sync the pending store with the graph state: the checkpointer
+    # persists `pending_item`/`pending_subject_id` per thread
     # (replaces the old module-level global `_PENDING_ITEM`).
     from agents_backend.shared.events import get_current_thread_id
     from agents_backend.shared.pending import pending_store
@@ -146,10 +146,10 @@ def _call_tools_node(state: ConversationalState) -> dict:
 
 
 def _build_postgres_checkpointer():
-    """Crea un checkpointer persistente en PostgreSQL.
+    """Creates a persistent PostgreSQL checkpointer.
 
-    Usa la misma BD del proyecto (DATABASE_URL). La tabla `checkpoints` se
-    crea con `.setup()` al primer uso.
+    Uses the project's own DB (DATABASE_URL). The `checkpoints` table is
+    created with `.setup()` on first use.
     """
     from langgraph.checkpoint.postgres import PostgresSaver
     from psycopg import Connection
@@ -157,21 +157,22 @@ def _build_postgres_checkpointer():
     dsn = settings.database_url
     conn = Connection.connect(dsn)
     saver = PostgresSaver(conn)
-    saver.setup()  # crea la tabla `checkpoints` si no existe
+    saver.setup()  # creates the `checkpoints` table if it does not exist
     return saver
 
 
 def build_conversational_graph(checkpointer=None):
-    """Construye y compila el grafo conversacional.
+    """Builds and compiles the conversational graph.
 
-    Por defecto usa un checkpointer PERSISTENTE en PostgreSQL (para retomar
-    conversaciones entre reinicios). Si `checkpointer` se provee, se usa ese.
+    By default it uses a PERSISTENT PostgreSQL checkpointer (to resume
+    conversations across restarts). If a `checkpointer` is provided, that
+    one is used instead.
     """
     if checkpointer is None:
         try:
             checkpointer = _build_postgres_checkpointer()
         except Exception:  # noqa: BLE001
-            # Fallback a memoria si no hay BD disponible.
+            # Fall back to memory if no DB is available.
             checkpointer = InMemorySaver()
 
     graph = StateGraph(ConversationalState)
@@ -191,5 +192,5 @@ def build_conversational_graph(checkpointer=None):
     return graph.compile(checkpointer=checkpointer)
 
 
-# Singleton del grafo (reutilizable, con checkpointer en memoria por defecto).
+# Graph singleton (reusable, with in-memory checkpointer by default).
 conversational_graph = build_conversational_graph()

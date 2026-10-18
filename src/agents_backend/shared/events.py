@@ -44,7 +44,7 @@ SCHEMA_VERSION = 1
 
 @dataclass
 class AgentEvent:
-    """Evento tipado emitido por una tool del agente."""
+    """Typed event emitted by an agent tool."""
 
     type: EventType
     thread_id: str

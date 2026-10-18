@@ -37,7 +37,7 @@ def _validate_priority(v: str) -> str:
 
 
 def review_question(item: dict | "GeneratedItem") -> AIReviewResult:
-    """Verifica una pregunta (dict de `GeneratedItem`) con el LLM evaluador.
+    """Reviews a question (dict of `GeneratedItem`) with the evaluator LLM.
 
     Args:
         item: dict representation of the question (statement, options,

@@ -786,7 +786,7 @@ def export_questions(
             else f"📊 **Export of {len(questions)} question(s) in CSV attached to the chat.**"
         )
         label = "Download the Excel" if fmt == "xlsx" else "Download the CSV"
-        attachment_md = build_attachment_markdown(upload, titulo=title, etiqueta=label)
+        attachment_md = build_attachment_markdown(upload, title=title, label=label)
     except Exception as e:  # noqa: BLE001
         # Fallback: direct HTTP link served by the API.
         attachment_md = (
