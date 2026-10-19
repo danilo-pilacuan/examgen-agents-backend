@@ -627,6 +627,7 @@ def generate_exam_pdf(
     total_questions: int = 5,
     use_bank: bool = True,
     num_versions: int = 1,
+    exam_name: str = "",
 ) -> str:
     """Generates an exam from the question bank and returns a ZIP package.
 
@@ -634,14 +635,19 @@ def generate_exam_pdf(
     (if `use_bank=True`) or generating new ones. Compiles the LaTeX to PDF
     and packages everything into a ZIP.
 
-    Each version is compiled TWICE: with answers (instructor copy) and
-    without answers (student copy). The ZIP contains all the PDFs.
+    Each version is compiled TWICE: `<Name>_A.pdf` (student copy, without
+    answers) and `<Name>_A_respondido.pdf` (instructor copy, with answers),
+    where `<Name>` is the exam name and A/B/C... is the version letter.
+    The ZIP `<Name>.zip` contains all the PDFs and the exam is persisted
+    in the database (visible in the Exams view).
 
-    IMPORTANT (human-in-the-loop): when the professor asks for an exam
-    WITHOUT specifying the number of versions, do NOT call this tool yet:
-    first show the blueprint summary (number of questions, Bloom/difficulty
-    distribution) and ASK how many versions they want (1-10). Call this
-    tool only after the professor confirms the number.
+    IMPORTANT (human-in-the-loop): when the professor asks for an exam,
+    do NOT call this tool yet. First show the blueprint summary (number of
+    questions, Bloom/difficulty distribution) and ASK for TWO things:
+    1. a NAME for the exam (e.g. 'Midterm 1'); if the professor does not
+       provide one, propose one based on the subject and date;
+    2. how many VERSIONS they want (1-10, shuffled anti-copy style).
+    Call this tool only after the professor confirms both.
     """
     from agents_backend.exam_pipeline.graph import run_exam_pipeline
     from core.domain.schemas.exam import (
@@ -683,6 +689,7 @@ def generate_exam_pdf(
         estimated_duration_minutes=60,
     )
     blueprint.metadata.num_versions = num_versions
+    blueprint.metadata.name = exam_name.strip() or f"{subject_name} exam"
 
     try:
         result = run_exam_pipeline(
@@ -697,7 +704,7 @@ def generate_exam_pdf(
         return f"❌ Error generating the exam: {str(e)[:300]}"
 
     # The compiler node packages all the PDFs (with/without answers per
-    # version) into a single ZIP artifact.
+    # version) into a single ZIP artifact and persists the exam in the DB.
     zip_path = result.get("zip_path")
     if not zip_path:
         return (
@@ -734,10 +741,11 @@ def generate_exam_pdf(
 
     version_note = f" · Versions: {num_versions}" if num_versions > 1 else ""
     return (
-        f"✅ **Exam generated successfully.**\n"
+        f"✅ **Exam '{blueprint.metadata.name}' generated successfully.**\n"
         f"- Subject: **{subject_name}**\n"
         f"- Questions: {len(result.get('approved_items', []))}{version_note}\n"
-        f"- Package: {num_pdfs} PDFs (each version with and without answers)\n\n"
+        f"- Package: {num_pdfs} PDFs (each version without answers + answered copy)\n"
+        f"- Saved to the Exams view\n\n"
         f"{attachment_md}"
     )
 

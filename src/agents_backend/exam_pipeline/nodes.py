@@ -6,6 +6,8 @@ are concatenated; the rest are overwritten).
 """
 import random
 import time
+import uuid
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -522,73 +524,113 @@ def compiler_node(state: dict) -> dict:
             logs.append({"attempt_number": compilation_attempts, "version": idx + 1, "success": False, "error_excerpt": _extract_error_excerpt(e)})
 
     # Rename the compiled PDFs to meaningful names and build the ZIP.
-    # The compiler returns /app/output/<job_id>.pdf (random UUID names).
+    # The compiler returns /app/output/<job_id>.pdf (random UUID names);
+    # the professor-requested exam name makes the downloads intuitive:
+    # <Name>_A.pdf, <Name>_A_respondido.pdf, ..., <Name>.zip
     zip_path: str | None = None
     if all_success and pdf_paths:
         try:
-            from pathlib import Path
-
+            from core.infrastructure.files.naming import slugify, version_letter
             from core.infrastructure.files.output_paths import get_output_dir
 
             output_dir = get_output_dir()
+            exam = state.get("compiled_exam")
+            exam_name = (
+                getattr(getattr(exam, "blueprint", None), "metadata", None).name
+                if exam is not None and getattr(getattr(exam, "blueprint", None), "metadata", None).name
+                else state.get("subject_name") or "exam"
+            )
+            base = slugify(exam_name) or "exam"
             num_versions = max(1, len(pdf_paths) // 2)
-            multi = len(pdf_paths) > 2  # more than one (with, without) pair
             renamed: list[str] = []
             for i, p in enumerate(pdf_paths):
                 src = Path(p)
                 if not src.exists():
                     renamed.append(p)
                     continue
-                if multi:
-                    version = i // 2 + 1
-                    suffix = "with_answers" if i % 2 == 0 else "no_answers"
-                    dest = output_dir / f"{src.stem}_v{version}_{suffix}.pdf"
-                else:
-                    suffix = "with_answers" if i % 2 == 0 else "no_answers"
-                    dest = output_dir / f"{src.stem}_{suffix}.pdf"
-                if dest != src:
-                    src.replace(dest)
+                version = version_letter(i // 2)
+                suffix = "respondido" if i % 2 == 0 else ""
+                stem = f"{base}_{version}" + (f"_{suffix}" if suffix else "")
+                dest = output_dir / f"{stem}.pdf"
+                # Avoid overwriting an existing artifact from a previous run
+                # with the same name: append a numeric suffix.
+                if dest.exists():
+                    n = 2
+                    while (output_dir / f"{stem}_{n}.pdf").exists():
+                        n += 1
+                    dest = output_dir / f"{stem}_{n}.pdf"
+                src.replace(dest)
                 renamed.append(str(dest))
 
             # ZIP with all the PDFs (with and without answers).
             import zipfile
 
-            exam_id = Path(renamed[0]).stem.split("_v")[0].split("_with")[0].split("_no")[0]
-            zip_dest = output_dir / f"exam_{exam_id}.zip"
+            zip_dest = output_dir / f"{base}.zip"
+            if zip_dest.exists():
+                n = 2
+                while (output_dir / f"{base}_{n}.zip").exists():
+                    n += 1
+                zip_dest = output_dir / f"{base}_{n}.zip"
             with zipfile.ZipFile(zip_dest, "w", zipfile.ZIP_DEFLATED) as zf:
                 for p in renamed:
                     zf.write(p, arcname=Path(p).name)
             zip_path = str(zip_dest)
 
-            # Raw JSON artifact (blueprint + items): internal record used by
-            # the Exams view to enrich the generated-exams table. Not shown
-            # in the chat (the professor consumes the ZIP there).
+            # Persist the exam in the DB (professor request): one row per
+            # generation, with the blueprint, items and artifact names.
             try:
                 import json as jsonlib
                 from datetime import datetime
 
+                from core.domain.models import Exam as ExamModel
+                from core.infrastructure.db.connection import SessionLocal
+
                 exam = state.get("compiled_exam")
+                db = SessionLocal()
+                try:
+                    db.add(ExamModel(
+                        subject_id=uuid.UUID(str(state.get("subject_id"))),
+                        name=exam_name,
+                        blueprint=(
+                            exam.blueprint.model_dump(mode="json")
+                            if exam is not None else {}
+                        ),
+                        items=[
+                            (item.model_dump(mode="json") if hasattr(item, "model_dump") else item)
+                            for item in ((exam.items if exam is not None else []) or [])
+                        ],
+                        num_versions=num_versions,
+                        pdf_paths=[Path(p).name for p in renamed],
+                        zip_path=zip_dest.name,
+                        created_by=state.get("created_by") or "chat",
+                    ))
+                    db.commit()
+                finally:
+                    db.close()
+
+                # Raw JSON artifact (blueprint + items): internal record used
+                # by the Exams view to enrich the table. Not shown in the chat.
                 payload = {
                     "subject_id": state.get("subject_id"),
                     "subject_name": state.get("subject_name"),
+                    "exam_name": exam_name,
                     "generated_at": datetime.now().isoformat(),
                     "num_versions": num_versions,
                     "blueprint": (
                         exam.blueprint.model_dump(mode="json")
-                        if exam is not None
-                        else {}
+                        if exam is not None else {}
                     ),
                     "items": [
                         (item.model_dump(mode="json") if hasattr(item, "model_dump") else item)
                         for item in ((exam.items if exam is not None else []) or [])
                     ],
                 }
-                (output_dir / f"exam_{exam_id}.json").write_text(
+                (output_dir / f"{base}.json").write_text(
                     jsonlib.dumps(payload, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
             except Exception:  # noqa: BLE001
-                pass  # enrichment is optional; never fail the ZIP delivery
+                pass  # persistence/enrichment is optional; never fail the ZIP
 
             pdf_paths = renamed
         except Exception as e:  # noqa: BLE001
