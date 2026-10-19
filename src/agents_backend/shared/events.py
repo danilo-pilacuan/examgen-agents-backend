@@ -36,6 +36,7 @@ class EventType(str, Enum):
     MATERIAL_INDEXED = "material_indexed"       # payload: {"chunks": n, "filename", "subject_name"}
     QUESTION_SAVED = "question_saved"           # payload: {"question_id", "verified_by_human"}
     SUBJECT_REGISTERED = "subject_registered"   # payload: {"subject_id", "subject_name"}
+    SUBJECT_SELECTED = "subject_selected"       # payload: {"subject_id", "subject_name"}
     CANCELLED = "cancelled"                     # payload: {"message"} — cancellation via WS
 
 

@@ -29,6 +29,7 @@ from core.domain.schemas.tools import (
     ConfirmVerificationInput,
     COLUMN_LABELS,
     DEFAULT_TABLE_COLUMNS,
+    DeleteQuestionInput,
     ExportQuestionsInput,
     GenerateExamPdfInput,
     GenerateQuestionInput,
@@ -38,6 +39,8 @@ from core.domain.schemas.tools import (
     SavePendingQuestionInput,
     SaveQuestionInput,
     SearchQuestionsInput,
+    SelectSubjectInput,
+    UpdateQuestionInput,
     TableColumn,
 )
 
@@ -383,6 +386,112 @@ def confirm_human_verification(question_id: str) -> str:
         f"✅ Question {q.id} marked as **verified by human**. "
         "From now on it cannot be modified by the agent."
     )
+
+
+@tool(args_schema=DeleteQuestionInput)
+def delete_question_tool(question_id: str) -> str:
+    """DELETES a question from the bank.
+
+    Use it when the professor explicitly asks to delete/remove a question
+    ('delete question X', 'remove that question'). NEVER delete without the
+    professor's explicit request. Questions verified by a human CANNOT be
+    deleted (guardrail): the professor must first un-verify them from the
+    Bank view.
+
+    Args:
+        question_id: id (UUID) of the question to delete. Get it from
+            `search_questions` if you don't know it.
+    """
+    try:
+        bank.delete_question(question_id)
+    except bank.SecurityError as e:
+        return f"🔒 {str(e)[:200]}"
+    except Exception as e:  # noqa: BLE001
+        return f"❌ Could not delete: {str(e)[:200]}"
+    return f"🗑 Question {question_id} deleted from the bank."
+
+
+@tool(args_schema=UpdateQuestionInput)
+def update_question_tool(
+    question_id: str,
+    topic: str | None = None,
+    subtopic: str | None = None,
+    bloom_level: str | None = None,
+    difficulty: str | None = None,
+    question_type: str | None = None,
+    question_text: str | None = None,
+    options: list[dict] | None = None,
+    expected_answer: str | None = None,
+    solution_explanation: str | None = None,
+    points: float | None = None,
+) -> str:
+    """UPDATES one or more fields of an existing bank question.
+
+    Use it when the professor asks to modify/fix a question ('change the
+    difficulty to hard', 'fix the statement', 'update the answer'). Only the
+    provided fields are updated. Questions verified by a human CANNOT be
+    modified (guardrail): the professor must first un-verify them from the
+    Bank view.
+
+    Args:
+        question_id: id (UUID) of the question to update.
+        topic / subtopic / bloom_level / difficulty / question_type /
+        question_text / options / expected_answer / solution_explanation /
+        points: new values (only send the ones to change).
+    """
+    fields: dict[str, Any] = {}
+    if topic is not None:
+        fields["topic"] = topic
+    if subtopic is not None:
+        fields["subtopic"] = subtopic
+    if bloom_level is not None:
+        fields["bloom_level"] = bloom_level
+    if difficulty is not None:
+        fields["difficulty"] = difficulty
+    if question_type is not None:
+        fields["question_type"] = question_type
+    if question_text is not None:
+        fields["question_text"] = question_text
+    if options is not None:
+        fields["options"] = options
+    if expected_answer is not None:
+        fields["expected_answer"] = expected_answer
+    if solution_explanation is not None:
+        fields["solution_explanation"] = solution_explanation
+    if points is not None:
+        fields["points"] = points
+
+    if not fields:
+        return "⚠️ No fields to update were provided."
+
+    try:
+        q = bank.update_question(question_id, fields=fields)
+    except bank.SecurityError as e:
+        return f"🔒 {str(e)[:200]}"
+    except Exception as e:  # noqa: BLE001
+        return f"❌ Could not update: {str(e)[:200]}"
+
+    updated = ", ".join(fields.keys())
+    return (
+        f"✅ Question {q.id} updated ({updated}).\n\n"
+        f"{_render_item_for_chat_from_question(q)}"
+    )
+
+
+def _render_item_for_chat_from_question(q) -> str:
+    """Formats a bank question for the chat (update confirmation)."""
+    lines = [f"📝 **{q.question_text}**"]
+    if q.options:
+        for i, o in enumerate(q.options, start=1):
+            mark = "✔" if o.get("is_correct") else ""
+            lines.append(f"   {i}. {o.get('text', '')} {mark}")
+    if q.expected_answer:
+        lines.append(f"✅ **Expected answer:** {q.expected_answer}")
+    lines.append(
+        f"🏷 Topic: {q.topic} · Level: {q.bloom_level} · "
+        f"Difficulty: {q.difficulty} · Type: {q.question_type}"
+    )
+    return "\n".join(lines)
 
 
 @tool(args_schema=SavePendingQuestionInput)
@@ -956,6 +1065,42 @@ def list_subject_material(subject_id: str) -> str:
         lines.append(f"- **{source}** · {count} chunk(s)")
     lines.append("\nThis material is used as RAG context to generate questions and exams.")
     return "\n".join(lines)
+
+
+@tool(args_schema=SelectSubjectInput)
+def select_subject(subject_id: str) -> str:
+    """Makes a subject the ACTIVE one for the conversation.
+
+    Use it when the professor asks to work on a subject ('work on Physics 1',
+    'select Applied Economics', 'switch to Calculus'). The frontend reacts to
+    this event: the subject selector in the header updates automatically.
+
+    Args:
+        subject_id: id (UUID) of the subject to activate. Get it from
+            `list_subjects` if you don't know it.
+    """
+    from core.infrastructure.db.connection import SessionLocal
+    from core.domain.models import Subject
+
+    db = SessionLocal()
+    try:
+        try:
+            sid = uuid.UUID(subject_id)
+        except ValueError:
+            return f"⚠️ '{subject_id}' is not a valid subject id (UUID)."
+        subject = db.get(Subject, sid)
+        if subject is None:
+            return f"The subject with id `{subject_id}` does not exist."
+        emit_event(
+            EventType.SUBJECT_SELECTED,
+            {"subject_id": str(subject.id), "subject_name": subject.name},
+        )
+        return (
+            f"✅ Active subject set to **{subject.name}** (id: `{subject.id}`). "
+            "The selector in the header has been updated."
+        )
+    finally:
+        db.close()
 
 
 @tool(args_schema=RegisterSubjectInput)

@@ -25,6 +25,7 @@ from agents_backend.conversational.state import ConversationalState
 from agents_backend.conversational.tools import (
     add_material_file,
     confirm_human_verification,
+    delete_question_tool,
     export_questions,
     generate_exam_pdf,
     generate_question,
@@ -34,6 +35,8 @@ from agents_backend.conversational.tools import (
     save_pending_question,
     save_question,
     search_questions,
+    select_subject,
+    update_question_tool,
 )
 from agents_backend.shared.llm import get_llm
 from core.config import settings
@@ -46,10 +49,13 @@ TOOLS = [
     save_question,
     save_pending_question,
     confirm_human_verification,
+    delete_question_tool,
+    update_question_tool,
     generate_exam_pdf,
     add_material_file,
     list_subject_material,
     register_subject,
+    select_subject,
 ]
 TOOL_BY_NAME = {t.name: t for t in TOOLS}
 
