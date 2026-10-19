@@ -32,7 +32,7 @@ class EventType(str, Enum):
 
     QUESTION_GENERATED = "question_generated"   # payload: serialized GeneratedItem
     QUESTIONS_LISTED = "questions_listed"       # payload: {"questions": [...], "total": n}
-    ARTIFACT_READY = "artifact_ready"           # payload: {"kind": "pdf|csv|xlsx", "url", "filename"}
+    ARTIFACT_READY = "artifact_ready"           # payload: {"kind": "pdf|csv|xlsx|json", "url", "filename"}
     MATERIAL_INDEXED = "material_indexed"       # payload: {"chunks": n, "filename", "subject_name"}
     QUESTION_SAVED = "question_saved"           # payload: {"question_id", "verified_by_human"}
     SUBJECT_REGISTERED = "subject_registered"   # payload: {"subject_id", "subject_name"}

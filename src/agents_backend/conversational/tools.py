@@ -29,6 +29,7 @@ from core.domain.schemas.tools import (
     ConfirmVerificationInput,
     COLUMN_LABELS,
     DEFAULT_TABLE_COLUMNS,
+    DeleteMaterialFileInput,
     DeleteQuestionInput,
     ExportQuestionsInput,
     GenerateExamPdfInput,
@@ -714,6 +715,45 @@ def generate_exam_pdf(
             },
         )
 
+    # Intermediate JSON (raw data before LaTeX rendering): blueprint + items.
+    json_link_md = ""
+    try:
+        import json as jsonlib
+        from datetime import datetime
+
+        from core.infrastructure.files.output_paths import get_output_dir
+
+        approved = result.get("approved_items", []) or []
+        payload = {
+            "subject_id": subject_id,
+            "subject_name": subject_name,
+            "generated_at": datetime.now().isoformat(),
+            "num_versions": num_versions,
+            "blueprint": blueprint.model_dump(mode="json"),
+            "items": [
+                (item.model_dump(mode="json") if hasattr(item, "model_dump") else item)
+                for item in approved
+            ],
+        }
+        json_name = f"exam_{Path(pdf_paths[0]).stem}.json"
+        json_path = get_output_dir() / json_name
+        json_path.write_text(
+            jsonlib.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        emit_event(
+            EventType.ARTIFACT_READY,
+            {
+                "kind": "json",
+                "url": f"/output/{json_name}",
+                "filename": json_name,
+            },
+        )
+        json_link_md = f"- 🧾 [Download the JSON (raw data)](http://localhost:8000/output/{json_name})"
+    except Exception as e:  # noqa: BLE001
+        # The JSON is a convenience artifact: never block the exam delivery.
+        json_link_md = f"- ⚠️ JSON not available ({str(e)[:120]})"
+
     # Upload each PDF to Open WebUI as a native chat attachment.
     try:
         from exam_app.infrastructure.openwebui_bridge import upload_file_to_openwebui, build_attachment_markdown
@@ -741,7 +781,8 @@ def generate_exam_pdf(
     return (
         f"✅ **Exam generated successfully.**\n"
         f"- Subject: **{subject_name}**\n"
-        f"- Questions: {len(result.get('approved_items', []))}{version_note}\n\n"
+        f"- Questions: {len(result.get('approved_items', []))}{version_note}\n"
+        f"{json_link_md}\n\n"
         f"{attachment_md}"
     )
 
@@ -753,27 +794,29 @@ def export_questions(
     topic: str | None = None,
     limit: int = 100,
 ) -> str:
-    """EXPORTS the bank questions to a CSV or Excel (xlsx) file.
+    """EXPORTS the bank questions to a CSV, Excel (xlsx) or JSON file.
 
     Use it when the professor asks 'export the questions', 'download them in
-    Excel/CSV' or wants to take the bank to a spreadsheet. Generates the file
-    with ALL the bank columns (statement, options, answer, solution,
-    verification, etc.) and uploads it as a downloadable chat attachment.
+    Excel/CSV/JSON' or wants to take the bank to a spreadsheet (or download
+    the raw JSON data). Generates the file with ALL the bank columns
+    (statement, options, answer, solution, verification, etc.) and uploads
+    it as a downloadable chat attachment.
 
     Args:
         subject_id: subject id (UUID).
-        format: 'csv' or 'xlsx' (Excel).
+        format: 'csv', 'xlsx' (Excel) or 'json' (raw data).
         topic: optional filter by exact topic.
         limit: max number of questions to export (1-500).
     """
     import csv
     import io
+    import json as jsonlib
     from datetime import datetime
 
     from exam_app.infrastructure.openwebui_bridge import upload_file_to_openwebui, build_attachment_markdown
 
     fmt = (format or "csv").strip().lower()
-    if fmt not in ("csv", "xlsx"):
+    if fmt not in ("csv", "xlsx", "json"):
         fmt = "csv"
 
     questions = bank.list_questions(
@@ -865,6 +908,44 @@ def export_questions(
             out_path = OUTPUT_DIR / f"questions_{stamp}.xlsx"
             wb.save(out_path)
             mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        elif fmt == "json":
+            # Raw data: full records (all fields), not just the table columns.
+            payload = {
+                "subject_id": subject_id,
+                "topic_filter": topic,
+                "exported_at": datetime.now().isoformat(),
+                "count": len(questions),
+                "questions": [
+                    {
+                        "id": str(q.id),
+                        "subject_id": str(q.subject_id),
+                        "topic": q.topic,
+                        "subtopic": q.subtopic,
+                        "bloom_level": q.bloom_level,
+                        "difficulty": q.difficulty,
+                        "question_type": q.question_type,
+                        "question_text": q.question_text,
+                        "options": q.options,
+                        "expected_answer": q.expected_answer,
+                        "solution_explanation": q.solution_explanation,
+                        "points": q.points,
+                        "verified_by_human": q.verified_by_human,
+                        "verified_by_ai": q.verified_by_ai,
+                        "ai_review_notes": q.ai_review_notes,
+                        "ai_review_priority": q.ai_review_priority,
+                        "source": q.source,
+                        "created_by": q.created_by,
+                        "created_at": str(q.created_at),
+                    }
+                    for q in questions
+                ],
+            }
+            out_path = OUTPUT_DIR / f"questions_{stamp}.json"
+            out_path.write_text(
+                jsonlib.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            mime = "application/json"
         else:
             buf = io.StringIO()
             writer = csv.writer(buf, quoting=csv.QUOTE_ALL)
@@ -880,7 +961,7 @@ def export_questions(
     emit_event(
         EventType.ARTIFACT_READY,
         {
-            "kind": "xlsx" if fmt == "xlsx" else "csv",
+            "kind": fmt,
             "url": f"/output/{out_path.name}",
             "filename": out_path.name,
         },
@@ -889,13 +970,19 @@ def export_questions(
     # Upload the file to Open WebUI as a native chat attachment.
     try:
         upload = upload_file_to_openwebui(out_path, mime_type=mime)
-        title = (
-            f"📊 **Export of {len(questions)} question(s) in Excel attached to the chat.**"
-            if fmt == "xlsx"
-            else f"📊 **Export of {len(questions)} question(s) in CSV attached to the chat.**"
+        title_by_fmt = {
+            "xlsx": f"📊 **Export of {len(questions)} question(s) in Excel attached to the chat.**",
+            "csv": f"📊 **Export of {len(questions)} question(s) in CSV attached to the chat.**",
+            "json": f"🧾 **Export of {len(questions)} question(s) in JSON attached to the chat.**",
+        }
+        label_by_fmt = {
+            "xlsx": "Download the Excel",
+            "csv": "Download the CSV",
+            "json": "Download the JSON",
+        }
+        attachment_md = build_attachment_markdown(
+            upload, title=title_by_fmt[fmt], label=label_by_fmt[fmt]
         )
-        label = "Download the Excel" if fmt == "xlsx" else "Download the CSV"
-        attachment_md = build_attachment_markdown(upload, title=title, label=label)
     except Exception as e:  # noqa: BLE001
         # Fallback: direct HTTP link served by the API.
         attachment_md = (
@@ -1064,6 +1151,54 @@ def list_subject_material(subject_id: str) -> str:
     for source, count in sorted(counts.items()):
         lines.append(f"- **{source}** · {count} chunk(s)")
     lines.append("\nThis material is used as RAG context to generate questions and exams.")
+    return "\n".join(lines)
+
+
+@tool(args_schema=DeleteMaterialFileInput)
+def delete_material_file_tool(
+    subject_id: str,
+    source_file: str,
+    delete_physical_file: bool = True,
+) -> str:
+    """Deletes an indexed material file from a subject.
+
+    Use it ONLY when the professor explicitly asks to delete/remove a file
+    from the subject's material. Get the exact `source_file` from
+    `list_subject_material` first (never invent it). This removes the
+    indexed chunks (RAG context) and, by default, the physical file from
+    the subject's material folder.
+    """
+    from core.domain.material.service import delete_source_file
+
+    try:
+        result = delete_source_file(
+            subject_id,
+            source_file,
+            delete_physical_file=delete_physical_file,
+        )
+    except ValueError as e:
+        return f"⚠️ {str(e)}"
+
+    if result["deleted_chunks"] == 0:
+        return (
+            f"⚠️ No indexed chunks found for source **{source_file}** in "
+            f"**{result['subject']}**. Check the exact name with "
+            "`list_subject_material`."
+        )
+
+    lines = [
+        f"🗑️ Deleted material of **{result['subject']}**:",
+        f"- Source: **{source_file}**",
+        f"- Indexed chunks removed: **{result['deleted_chunks']}**",
+    ]
+    physical = result["physical_file"]
+    if physical == "deleted":
+        lines.append("- Physical file: deleted from the material folder")
+    elif physical == "not_found":
+        lines.append("- Physical file: not found in the material folder (only chunks removed)")
+    elif physical == "kept":
+        lines.append("- Physical file: kept (not requested for deletion)")
+    lines.append("\nThe remaining material is still available as RAG context.")
     return "\n".join(lines)
 
 

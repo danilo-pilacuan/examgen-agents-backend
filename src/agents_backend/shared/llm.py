@@ -3,9 +3,37 @@
 The pipeline is provider-agnostic: just change `llm_base_url` in `.env` to
 use real OpenAI or another compatible endpoint.
 """
+from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
 from core.config import settings
+
+
+class ReasoningCaptureChatOpenAI(ChatOpenAI):
+    """ChatOpenAI that preserves the vLLM `reasoning` field.
+
+    langchain-openai drops the non-standard `reasoning` field that vLLM
+    returns for reasoning models (GLM/DeepSeek). This subclass copies it
+    (from the raw SDK message's `model_extra`) into
+    `AIMessage.additional_kwargs["reasoning"]` so the raw-audit
+    (`core.domain.llm_log.service.extract_thinking`) can store the chain
+    of thought when `LLM_CAPTURE_THINKING=true`.
+    """
+
+    def _create_chat_result(self, response, generation_info=None):  # noqa: ANN001, ANN202
+        result = super()._create_chat_result(response, generation_info)
+        try:
+            raw_message = getattr(response, "choices", [None])[0].message
+            extra = getattr(raw_message, "model_extra", None) or {}
+            reasoning = extra.get("reasoning") or extra.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning.strip():
+                for generation in result.generations:
+                    message = generation.message
+                    if isinstance(message, AIMessage):
+                        message.additional_kwargs.setdefault("reasoning", reasoning)
+        except (AttributeError, IndexError, TypeError):
+            pass
+        return result
 
 
 def get_llm(
@@ -19,7 +47,7 @@ def get_llm(
     The Generator uses `none` (JSON in content); the Evaluator uses `none`
     with low temperature (deterministic judgment and valid JSON).
     """
-    return ChatOpenAI(
+    return ReasoningCaptureChatOpenAI(
         model=settings.llm_model,
         base_url=settings.llm_base_url,
         api_key=settings.openai_api_key,

@@ -5,6 +5,7 @@ LangGraph merges into the state (fields with the `operator.add` reducer
 are concatenated; the rest are overwritten).
 """
 import random
+import time
 from typing import Any
 
 import requests
@@ -288,7 +289,9 @@ def generator_node(state: dict) -> dict:
 
     try:
         structured = generator_llm.with_structured_output(GeneratedItem)
+        started_at = time.perf_counter()
         item = structured.invoke(prompt)
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
     except Exception as e:  # noqa: BLE001
         # If the LLM fails, log the failure as a rejection and move on.
         return {
@@ -303,6 +306,17 @@ def generator_node(state: dict) -> dict:
             ),
             "total_llm_calls": state.get("total_llm_calls", 0) + 1,
         }
+
+    # Raw audit (best-effort): prompt + raw answer of the generator call.
+    from core.domain.llm_log.service import record_llm_response
+
+    record_llm_response(
+        context="pipeline:generator",
+        model=settings.llm_model,
+        prompt_messages=[{"role": "user", "content": prompt}],
+        raw_answer=item.model_dump_json() if item is not None else "",
+        latency_ms=latency_ms,
+    )
 
     return {
         "current_spec": spec,
@@ -355,7 +369,9 @@ def evaluator_node(state: dict) -> dict:
     )
     try:
         structured = evaluator_llm.with_structured_output(EvaluationResult)
+        started_at = time.perf_counter()
         result: EvaluationResult = structured.invoke(prompt)
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
     except Exception as e:  # noqa: BLE001
         result = EvaluationResult(
             approved=False,
@@ -363,6 +379,17 @@ def evaluator_node(state: dict) -> dict:
             difficulty_match=False,
             rejection_reason=f"evaluation_error: {_extract_error_excerpt(e)}",
         )
+
+    # Raw audit (best-effort): prompt + raw answer of the evaluator call.
+    from core.domain.llm_log.service import record_llm_response
+
+    record_llm_response(
+        context="pipeline:evaluator",
+        model=settings.llm_model,
+        prompt_messages=[{"role": "user", "content": prompt}],
+        raw_answer=result.model_dump_json(),
+        latency_ms=latency_ms,
+    )
 
     # 3) Combine: duplication overrides any approval.
     if is_duplicate:

@@ -12,6 +12,7 @@ The graph is exposed as an OpenAI-compatible endpoint to connect to OpenWebUI.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -25,6 +26,7 @@ from agents_backend.conversational.state import ConversationalState
 from agents_backend.conversational.tools import (
     add_material_file,
     confirm_human_verification,
+    delete_material_file_tool,
     delete_question_tool,
     export_questions,
     generate_exam_pdf,
@@ -54,6 +56,7 @@ TOOLS = [
     generate_exam_pdf,
     add_material_file,
     list_subject_material,
+    delete_material_file_tool,
     register_subject,
     select_subject,
 ]
@@ -83,8 +86,26 @@ def _make_llm():
 def _assistant_node(state: ConversationalState) -> dict:
     """Main node: the LLM decides to answer or call a tool."""
     llm = _make_llm()
-    response = llm.invoke(
-        [{"role": "system", "content": SYSTEM_PROMPT}] + state["messages"]
+    prompt_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + state["messages"]
+    started_at = time.perf_counter()
+    response = llm.invoke(prompt_messages)
+    latency_ms = int((time.perf_counter() - started_at) * 1000)
+
+    # Raw audit (best-effort): prompt + raw answer (+ thinking if enabled).
+    from agents_backend.shared.events import get_current_thread_id
+    from core.domain.llm_log.service import (
+        extract_thinking,
+        record_llm_response,
+    )
+
+    record_llm_response(
+        context="chat:model",
+        model=settings.llm_model,
+        prompt_messages=prompt_messages,
+        raw_answer=response.content if isinstance(response.content, str) else str(response.content),
+        raw_thinking=extract_thinking(response),
+        thread_id=get_current_thread_id(),
+        latency_ms=latency_ms,
     )
     return {"messages": [response]}
 
