@@ -57,7 +57,8 @@ class ExamGenerationState(TypedDict):
     latex_source: Optional[str]
     latex_sources: Optional[list[str]]   # LaTeX sources of the versions (if num_versions>1)
     compiled_exam: Optional[CompiledExam]
-    pdf_paths: Optional[list[str]]       # paths of the version PDFs
+    pdf_paths: Optional[list[str]]       # paths of the version PDFs (with/without answers)
+    zip_path: Optional[str]              # path of the ZIP artifact (all PDFs)
     compilation_attempts: int
     max_compilation_attempts: int
     compilation_log: Annotated[list[CompilationLogEntry], operator.add]

@@ -628,14 +628,20 @@ def generate_exam_pdf(
     use_bank: bool = True,
     num_versions: int = 1,
 ) -> str:
-    """Generates an exam from the question bank and returns a PDF.
+    """Generates an exam from the question bank and returns a ZIP package.
 
     Builds an exam using the subject's questions ALREADY EXISTING in the bank
-    (if `use_bank=True`) or generating new ones. Compiles the LaTeX to PDF and
-    uploads it as an attachment to Open WebUI.
+    (if `use_bank=True`) or generating new ones. Compiles the LaTeX to PDF
+    and packages everything into a ZIP.
 
-    If `num_versions > 1`, generates several versions of the exam (shuffled
-    questions and options, AMC anti-copy style) and attaches each PDF.
+    Each version is compiled TWICE: with answers (instructor copy) and
+    without answers (student copy). The ZIP contains all the PDFs.
+
+    IMPORTANT (human-in-the-loop): when the professor asks for an exam
+    WITHOUT specifying the number of versions, do NOT call this tool yet:
+    first show the blueprint summary (number of questions, Bloom/difficulty
+    distribution) and ASK how many versions they want (1-10). Call this
+    tool only after the professor confirms the number.
     """
     from agents_backend.exam_pipeline.graph import run_exam_pipeline
     from core.domain.schemas.exam import (
@@ -690,90 +696,39 @@ def generate_exam_pdf(
     except Exception as e:  # noqa: BLE001
         return f"❌ Error generating the exam: {str(e)[:300]}"
 
-    # PDF paths (several if num_versions>1).
-    pdf_paths = None
-    if result.get("compiled_exam"):
-        pdf_paths = result["compiled_exam"].pdf_paths or (
-            [result["compiled_exam"].pdf_path] if result["compiled_exam"].pdf_path else None
-        )
-
-    if not pdf_paths:
+    # The compiler node packages all the PDFs (with/without answers per
+    # version) into a single ZIP artifact.
+    zip_path = result.get("zip_path")
+    if not zip_path:
         return (
-            "Could not compile the exam PDF. "
+            "Could not compile the exam package. "
             f"Status: {result.get('status')} · Error: {result.get('error_message', 'unknown')}"
         )
 
-    # Typed events: one artifact_ready per PDF version.
-    for i, p in enumerate(pdf_paths):
-        emit_event(
-            EventType.ARTIFACT_READY,
-            {
-                "kind": "pdf",
-                "url": f"/output/{Path(p).name}",
-                "filename": Path(p).name,
-                "version": i + 1,
-            },
-        )
+    zip_name = Path(zip_path).name
+    num_pdfs = len(result.get("pdf_paths") or [])
 
-    # Intermediate JSON (raw data before LaTeX rendering): blueprint + items.
-    json_link_md = ""
-    try:
-        import json as jsonlib
-        from datetime import datetime
+    # Typed event: the ZIP artifact card in the frontend.
+    emit_event(
+        EventType.ARTIFACT_READY,
+        {
+            "kind": "zip",
+            "url": f"/output/{zip_name}",
+            "filename": zip_name,
+        },
+    )
 
-        from core.infrastructure.files.output_paths import get_output_dir
-
-        approved = result.get("approved_items", []) or []
-        payload = {
-            "subject_id": subject_id,
-            "subject_name": subject_name,
-            "generated_at": datetime.now().isoformat(),
-            "num_versions": num_versions,
-            "blueprint": blueprint.model_dump(mode="json"),
-            "items": [
-                (item.model_dump(mode="json") if hasattr(item, "model_dump") else item)
-                for item in approved
-            ],
-        }
-        json_name = f"exam_{Path(pdf_paths[0]).stem}.json"
-        json_path = get_output_dir() / json_name
-        json_path.write_text(
-            jsonlib.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        emit_event(
-            EventType.ARTIFACT_READY,
-            {
-                "kind": "json",
-                "url": f"/output/{json_name}",
-                "filename": json_name,
-            },
-        )
-        json_link_md = f"- 🧾 [Download the JSON (raw data)](http://localhost:8000/output/{json_name})"
-    except Exception as e:  # noqa: BLE001
-        # The JSON is a convenience artifact: never block the exam delivery.
-        json_link_md = f"- ⚠️ JSON not available ({str(e)[:120]})"
-
-    # Upload each PDF to Open WebUI as a native chat attachment.
+    # Upload the ZIP to Open WebUI as a native chat attachment.
     try:
         from exam_app.infrastructure.openwebui_bridge import upload_file_to_openwebui, build_attachment_markdown
 
-        attachments = []
-        for pdf_path in pdf_paths:
-            upload_result = upload_file_to_openwebui(pdf_path)
-            attachments.append(build_attachment_markdown(upload_result))
-        attachment_md = "\n\n".join(attachments)
+        upload_result = upload_file_to_openwebui(zip_path)
+        attachment_md = build_attachment_markdown(upload_result)
     except Exception as e:  # noqa: BLE001
         # If the upload fails, fall back to the direct HTTP link.
-        links = "\n".join(
-            f"- 📥 [Download PDF v{i + 1}](http://localhost:8000/output/{Path(p).name})"
-            for i, p in enumerate(pdf_paths)
-        )
         attachment_md = (
-            f"📄 **Exam generated and compiled to PDF.**\n"
-            f"- Subject: **{subject_name}**\n"
-            f"- Questions: {len(result.get('approved_items', []))}\n"
-            f"{links}\n\n"
+            f"📦 **Exam package ready.**\n"
+            f"- 📥 [Download {zip_name}](http://localhost:8000/output/{zip_name})\n\n"
             f"*(Could not attach to Open WebUI: {str(e)[:120]})*"
         )
 
@@ -782,7 +737,7 @@ def generate_exam_pdf(
         f"✅ **Exam generated successfully.**\n"
         f"- Subject: **{subject_name}**\n"
         f"- Questions: {len(result.get('approved_items', []))}{version_note}\n"
-        f"{json_link_md}\n\n"
+        f"- Package: {num_pdfs} PDFs (each version with and without answers)\n\n"
         f"{attachment_md}"
     )
 

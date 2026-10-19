@@ -414,6 +414,10 @@ def assembler_node(state: dict) -> dict:
     `num_versions`), generates multiple LaTeX sources (shuffled questions and
     options, AMC anti-copy style). Otherwise, generates a single version
     (previous behavior).
+
+    Each version is rendered TWICE: with answers (instructor copy) and
+    without answers (student copy). The compiler node packages both sets
+    into a ZIP artifact.
     """
     blueprint: ExamBlueprint = state["blueprint"]
     items: list[GeneratedItem] = state.get("approved_items", [])
@@ -427,7 +431,7 @@ def assembler_node(state: dict) -> dict:
     # Number of versions from the blueprint (default 1).
     num_versions = getattr(blueprint.metadata, "num_versions", 1) or 1
 
-    rendered = render_exam(
+    rendered_with = render_exam(
         exam,
         state["template_id"],
         state["subject_name"],
@@ -436,17 +440,31 @@ def assembler_node(state: dict) -> dict:
         print_answers=True,
         num_versions=num_versions,
     )
+    rendered_without = render_exam(
+        exam,
+        state["template_id"],
+        state["subject_name"],
+        instructions=blueprint.metadata.instructions or "Answer all questions in the space provided.",
+        duration_minutes=blueprint.estimated_duration_minutes,
+        print_answers=False,
+        num_versions=num_versions,
+    )
 
-    # Normalize to a list (render_exam returns str if num_versions<=1).
-    if isinstance(rendered, str):
-        latex_sources = [rendered]
-    else:
-        latex_sources = rendered
+    # Normalize to lists (render_exam returns str if num_versions<=1).
+    with_answers = [rendered_with] if isinstance(rendered_with, str) else rendered_with
+    without_answers = [rendered_without] if isinstance(rendered_without, str) else rendered_without
+
+    # Interleave: v1_with, v1_without, v2_with, v2_without, ... so the
+    # compiler can name the PDFs by position (2*i = with, 2*i+1 = without).
+    latex_sources = []
+    for i in range(num_versions):
+        latex_sources.append(with_answers[i])
+        latex_sources.append(without_answers[i])
 
     return {
         "compiled_exam": exam,
         "latex_source": latex_sources[0],          # compatibility: first version
-        "latex_sources": latex_sources,            # all versions
+        "latex_sources": latex_sources,            # with+without per version
     }
 
 
@@ -459,6 +477,12 @@ def compiler_node(state: dict) -> dict:
     If there are multiple versions (`latex_sources`), compiles each one and
     returns a list of PDF paths (`pdf_paths`). Otherwise, compiles the single
     version (previous behavior with `pdf_path`).
+
+    The assembler interleaves with/without answers per version
+    (2*i = with answers, 2*i+1 = without). After compiling, this node
+    renames the PDFs to `<job_id>_v<N>_with_answers.pdf` /
+    `<job_id>_v<N>_no_answers.pdf` and packages everything into a single
+    ZIP artifact (`<job_id>.zip`) for download.
     """
     latex_sources = state.get("latex_sources") or []
     if not latex_sources:
@@ -497,6 +521,80 @@ def compiler_node(state: dict) -> dict:
             all_success = False
             logs.append({"attempt_number": compilation_attempts, "version": idx + 1, "success": False, "error_excerpt": _extract_error_excerpt(e)})
 
+    # Rename the compiled PDFs to meaningful names and build the ZIP.
+    # The compiler returns /app/output/<job_id>.pdf (random UUID names).
+    zip_path: str | None = None
+    if all_success and pdf_paths:
+        try:
+            from pathlib import Path
+
+            from core.infrastructure.files.output_paths import get_output_dir
+
+            output_dir = get_output_dir()
+            num_versions = max(1, len(pdf_paths) // 2)
+            multi = len(pdf_paths) > 2  # more than one (with, without) pair
+            renamed: list[str] = []
+            for i, p in enumerate(pdf_paths):
+                src = Path(p)
+                if not src.exists():
+                    renamed.append(p)
+                    continue
+                if multi:
+                    version = i // 2 + 1
+                    suffix = "with_answers" if i % 2 == 0 else "no_answers"
+                    dest = output_dir / f"{src.stem}_v{version}_{suffix}.pdf"
+                else:
+                    suffix = "with_answers" if i % 2 == 0 else "no_answers"
+                    dest = output_dir / f"{src.stem}_{suffix}.pdf"
+                if dest != src:
+                    src.replace(dest)
+                renamed.append(str(dest))
+
+            # ZIP with all the PDFs (with and without answers).
+            import zipfile
+
+            exam_id = Path(renamed[0]).stem.split("_v")[0].split("_with")[0].split("_no")[0]
+            zip_dest = output_dir / f"exam_{exam_id}.zip"
+            with zipfile.ZipFile(zip_dest, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in renamed:
+                    zf.write(p, arcname=Path(p).name)
+            zip_path = str(zip_dest)
+
+            # Raw JSON artifact (blueprint + items): internal record used by
+            # the Exams view to enrich the generated-exams table. Not shown
+            # in the chat (the professor consumes the ZIP there).
+            try:
+                import json as jsonlib
+                from datetime import datetime
+
+                exam = state.get("compiled_exam")
+                payload = {
+                    "subject_id": state.get("subject_id"),
+                    "subject_name": state.get("subject_name"),
+                    "generated_at": datetime.now().isoformat(),
+                    "num_versions": num_versions,
+                    "blueprint": (
+                        exam.blueprint.model_dump(mode="json")
+                        if exam is not None
+                        else {}
+                    ),
+                    "items": [
+                        (item.model_dump(mode="json") if hasattr(item, "model_dump") else item)
+                        for item in ((exam.items if exam is not None else []) or [])
+                    ],
+                }
+                (output_dir / f"exam_{exam_id}.json").write_text(
+                    jsonlib.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:  # noqa: BLE001
+                pass  # enrichment is optional; never fail the ZIP delivery
+
+            pdf_paths = renamed
+        except Exception as e:  # noqa: BLE001
+            # The ZIP is a convenience artifact: never fail the compilation.
+            logs.append({"attempt_number": compilation_attempts, "version": 0, "success": True, "error_excerpt": f"zip_skipped: {str(e)[:150]}"})
+
     # Update the CompiledExam with the PDF paths.
     exam = state.get("compiled_exam")
     if exam is not None and pdf_paths:
@@ -508,6 +606,7 @@ def compiler_node(state: dict) -> dict:
         "compilation_attempts": compilation_attempts,
         "compilation_log": logs,
         "pdf_paths": pdf_paths,
+        "zip_path": zip_path,
     }
     if exam is not None:
         update["compiled_exam"] = exam

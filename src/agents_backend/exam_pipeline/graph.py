@@ -217,6 +217,7 @@ def run_exam_pipeline(
         "latex_sources": None,
         "compiled_exam": None,
         "pdf_paths": None,
+        "zip_path": None,
         "compilation_attempts": 0,
         "max_compilation_attempts": settings.max_compilation_attempts,
         "compilation_log": [],
