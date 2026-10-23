@@ -295,6 +295,16 @@ def generator_node(state: dict) -> dict:
         item = structured.invoke(prompt)
         latency_ms = int((time.perf_counter() - started_at) * 1000)
     except Exception as e:  # noqa: BLE001
+        # Structured log: silent rejections hide pipeline problems.
+        from core.domain.llm_log.service import record_llm_response
+
+        record_llm_response(
+            context="pipeline:generator_error",
+            model=settings.llm_model,
+            prompt_messages=[{"role": "user", "content": prompt}],
+            raw_answer=f"generation_error: {str(e)[:300]}",
+            latency_ms=None,
+        )
         # If the LLM fails, log the failure as a rejection and move on.
         return {
             "current_spec": spec,
@@ -375,6 +385,16 @@ def evaluator_node(state: dict) -> dict:
         result: EvaluationResult = structured.invoke(prompt)
         latency_ms = int((time.perf_counter() - started_at) * 1000)
     except Exception as e:  # noqa: BLE001
+        # Structured log: silent rejections hide pipeline problems.
+        from core.domain.llm_log.service import record_llm_response
+
+        record_llm_response(
+            context="pipeline:evaluator_error",
+            model=settings.llm_model,
+            prompt_messages=[{"role": "user", "content": prompt}],
+            raw_answer=f"evaluation_error: {str(e)[:300]}",
+            latency_ms=None,
+        )
         result = EvaluationResult(
             approved=False,
             quality_score=0.0,
@@ -496,6 +516,22 @@ def compiler_node(state: dict) -> dict:
                 "status": "failed",
                 "error_message": "There is no latex_source to compile",
             }
+
+    # Fail fast: an exam with zero approved items must NOT be compiled or
+    # published (it used to produce empty "completed" PDFs with 0 questions).
+    if not state.get("approved_items"):
+        return {
+            "status": "failed",
+            "error_message": "No items were approved; nothing to compile.",
+            "compilation_log": [
+                {
+                    "attempt_number": state.get("compilation_attempts", 0) + 1,
+                    "version": 0,
+                    "success": False,
+                    "error_excerpt": "empty_approved_items",
+                }
+            ],
+        }
 
     compilation_attempts = state.get("compilation_attempts", 0) + 1
     pdf_paths: list[str] = []
@@ -624,6 +660,10 @@ def compiler_node(state: dict) -> dict:
                         (item.model_dump(mode="json") if hasattr(item, "model_dump") else item)
                         for item in ((exam.items if exam is not None else []) or [])
                     ],
+                    # Audit fields: why items were rejected and how many LLM
+                    # calls the generation consumed (diagnostics).
+                    "rejection_log": state.get("rejection_log") or [],
+                    "total_llm_calls": state.get("total_llm_calls", 0),
                 }
                 (output_dir / f"{base}.json").write_text(
                     jsonlib.dumps(payload, ensure_ascii=False, indent=2),

@@ -703,6 +703,28 @@ def generate_exam_pdf(
     except Exception as e:  # noqa: BLE001
         return f"❌ Error generating the exam: {str(e)[:300]}"
 
+    # Fail fast: an exam with zero approved items is an error, not a
+    # deliverable (it used to compile and publish empty PDFs).
+    approved = result.get("approved_items") or []
+    if result.get("status") != "completed" or not approved:
+        rejection_lines = []
+        for entry in (result.get("rejection_log") or [])[:10]:
+            reason = entry.get("reason", "unknown")
+            spec_id = entry.get("spec_id", "?")
+            rejection_lines.append(f"  - spec `{spec_id}`: {reason}")
+        rejection_summary = (
+            "\n".join(rejection_lines)
+            if rejection_lines
+            else "  - (no rejection details recorded)"
+        )
+        return (
+            f"❌ The exam could not be generated: no question was approved by the "
+            f"evaluator (status: {result.get('status')}).\n"
+            f"Rejections:\n{rejection_summary}\n"
+            f"Total LLM calls: {result.get('total_llm_calls', 0)}. "
+            "Nothing was compiled or published. Please try again."
+        )
+
     # The compiler node packages all the PDFs (with/without answers per
     # version) into a single ZIP artifact and persists the exam in the DB.
     zip_path = result.get("zip_path")

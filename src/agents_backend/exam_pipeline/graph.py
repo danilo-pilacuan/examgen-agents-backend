@@ -50,6 +50,9 @@ def should_retry_compilation(state: dict) -> str:
     """Do we retry compilation or finish?"""
     if state.get("status") == "completed":
         return "end"
+    # A failed pipeline (e.g. no approved items) must not retry compilation.
+    if state.get("status") == "failed":
+        return "end"
     if state.get("compilation_attempts", 0) >= settings.max_compilation_attempts:
         return "end"
     return "retry"

@@ -182,7 +182,9 @@ def _build_postgres_checkpointer():
     from psycopg import Connection
 
     dsn = settings.database_url
-    conn = Connection.connect(dsn)
+    # autocommit: PostgresSaver.setup() runs `CREATE INDEX CONCURRENTLY`,
+    # which cannot run inside a transaction block (fails on a fresh DB).
+    conn = Connection.connect(dsn, autocommit=True)
     saver = PostgresSaver(conn)
     saver.setup()  # creates the `checkpoints` table if it does not exist
     return saver
