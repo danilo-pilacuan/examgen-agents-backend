@@ -505,6 +505,23 @@ def save_pending_question(verify_human: bool = False) -> str:
     """
     item, subject_id = get_pending_item()
     if not item or not subject_id:
+        # Tolerate re-queries after a dropped stream (BUG-10): the save may
+        # have completed even though the pending item was already cleared.
+        # The pending store keeps the last saved question id, so report the
+        # real bank state instead of a dead end.
+        tid = _current_thread()
+        saved_id = pending_store.get_saved_question_id(tid) if tid else None
+        if saved_id:
+            q = bank.get_question(saved_id)
+            if q is not None:
+                state_txt = (
+                    "verified by human" if q.verified_by_human
+                    else "saved but NOT verified by human yet"
+                )
+                return (
+                    f"✅ Your question was already saved (id: {q.id}) and is "
+                    f"currently {state_txt}. No action needed."
+                )
         return (
             "There is no pending question to save. First generate a question "
             "with the `generate_question` tool."
@@ -551,9 +568,6 @@ def save_pending_question(verify_human: bool = False) -> str:
         ai_review_priority=review.priority,
     )
 
-    # Clear the pending item.
-    set_pending_item(None, None)
-
     review_note = (
         f"\n🔍 **AI verification:** {'approved' if review.verified_by_ai else 'requires review'} "
         f"(priority {review.priority}). {review.notes}"
@@ -561,7 +575,14 @@ def save_pending_question(verify_human: bool = False) -> str:
         else ""
     )
 
-    # If the professor confirmed human verification, mark it.
+    # Record the saved id BEFORE clearing the pending item (BUG-10): if the
+    # stream dies right after, a re-query reports the real bank state.
+    from agents_backend.shared.events import get_current_thread_id
+
+    _tid = get_current_thread_id()
+    if _tid:
+        pending_store.set_saved_question_id(_tid, str(q.id))
+
     if verify_human:
         try:
             bank.set_human_verification(q.id, verified=True)
@@ -570,6 +591,7 @@ def save_pending_question(verify_human: bool = False) -> str:
                 EventType.QUESTION_SAVED,
                 {"question_id": str(q.id), "verified_by_human": False},
             )
+            set_pending_item(None, None)
             return (
                 f"✅ Question saved (id: {q.id}).{review_note}\n"
                 f"⚠️ Could not mark it as verified: {str(e)[:120]}"
@@ -578,6 +600,7 @@ def save_pending_question(verify_human: bool = False) -> str:
             EventType.QUESTION_SAVED,
             {"question_id": str(q.id), "verified_by_human": True},
         )
+        set_pending_item(None, None)
         return (
             f"✅ Question saved and **verified by human** (id: {q.id}).{review_note}\n"
             "From now on it cannot be modified by the agent."
@@ -587,6 +610,7 @@ def save_pending_question(verify_human: bool = False) -> str:
         EventType.QUESTION_SAVED,
         {"question_id": str(q.id), "verified_by_human": False},
     )
+    set_pending_item(None, None)
     return (
         f"✅ Question saved to the bank (id: {q.id}).{review_note}\n"
         "It is NOT marked as verified by human yet. "

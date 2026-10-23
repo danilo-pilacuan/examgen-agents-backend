@@ -24,6 +24,10 @@ class PendingItem:
     item: dict[str, Any]                 # GeneratedItem serializado
     subject_id: str
     subject_name: str | None = None
+    # DB id once the question has been saved (kept after clearing the
+    # pending item so re-queries after a dropped stream report the real
+    # bank state — BUG-10).
+    saved_question_id: str | None = None
 
 
 class PendingItemStore:
@@ -44,6 +48,23 @@ class PendingItemStore:
     def clear(self, thread_id: str) -> None:
         with self._lock:
             self._items.pop(thread_id, None)
+
+    def get_saved_question_id(self, thread_id: str) -> str | None:
+        """DB id of the last question saved in this thread (or None)."""
+        with self._lock:
+            pending = self._items.get(thread_id)
+        return pending.saved_question_id if pending else None
+
+    def set_saved_question_id(self, thread_id: str, question_id: str | None) -> None:
+        """Records the last saved question id (survives clearing the pending)."""
+        with self._lock:
+            pending = self._items.get(thread_id)
+            if pending is not None:
+                pending.saved_question_id = question_id
+            else:
+                self._items[thread_id] = PendingItem(
+                    item={}, subject_id="", saved_question_id=question_id
+                )
 
 
 # Singleton shared by exam-app and agents-backend (same instance in the same
