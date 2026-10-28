@@ -143,12 +143,42 @@ def ingestor_node(state: dict) -> dict:
     For the MVP it doesn't call the LLM: extracts text from PDFs, DOCX, PPTX,
     XLSX and text files, and builds a basic summary. (Full vector indexing is
     a later phase.)
+
+    When the pipeline runs without files (API path: RAG reads chunks from the
+    DB), reports the real count of indexed chunks of the subject instead of a
+    constant 0 (BUG-027 fix #2).
     """
     raw_paths = state.get("raw_materials_paths", [])
     chunks_count = 0
     fragments: list[str] = []
     processed: list[str] = []
     failed: list[str] = []
+
+    if not raw_paths:
+        try:
+            from sqlalchemy import func as sa_func
+
+            from core.domain.models import MaterialChunk
+            from core.infrastructure.db.connection import SessionLocal
+
+            db = SessionLocal()
+            try:
+                chunks_count = (
+                    db.query(sa_func.count(MaterialChunk.id))
+                    .filter(MaterialChunk.subject_id == uuid.UUID(state["subject_id"]))
+                    .scalar()
+                    or 0
+                )
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001
+            chunks_count = 0
+        return {
+            "syllabus_summary": "No materials loaded (using the subject's indexed material via RAG).",
+            "indexed_chunks_count": chunks_count,
+            "processed_files": [],
+            "failed_files": [],
+        }
 
     for path in raw_paths:
         path = str(path)
