@@ -285,6 +285,9 @@ def generator_node(state: dict) -> dict:
         f"- Difficulty: {spec.difficulty.value}\n"
         f"- Question type: {spec.question_type.value}\n"
         f"- Points: {spec.points}\n\n"
+        "LANGUAGE (mandatory): write the statement, every option, the "
+        "expected answer and the solution explanation in ENGLISH, regardless "
+        "of the language of the context material.\n\n"
         f"{context}\n\n"
         "Return only the requested structure."
     )
@@ -373,6 +376,10 @@ def evaluator_node(state: dict) -> dict:
     prompt = (
         "You are a rigorous exam item evaluator. Evaluate the following "
         "question and respond with the requested structure.\n\n"
+        "Criteria:\n"
+        "- APPROVE only if the item is written in ENGLISH (reject items in "
+        "any other language with rejection_reason='language_not_english').\n"
+        "- Evaluate pedagogical quality and difficulty match.\n\n"
         f"Requested specification:\n- Topic: {spec.topic}\n"
         f"- Bloom level: {spec.bloom_level.value}\n"
         f"- Difficulty: {spec.difficulty.value}\n"
