@@ -238,6 +238,10 @@ def planner_node(state: dict) -> dict:
 
     topics = [t for t, c in topic_counts.items() for _ in range(c)]
 
+    # Question types the professor allows (third review, Felipe). The
+    # blueprint validator guarantees a non-empty list.
+    allowed = list(blueprint.allowed_question_types)
+
     pending: list[ItemSpec] = []
     spec_index = 0
     for bloom, n_bloom in bloom_counts.items():
@@ -245,17 +249,24 @@ def planner_node(state: dict) -> dict:
             topic = topics[spec_index % len(topics)] if topics else "general"
             # Difficulty distribution within the current Bloom level.
             difficulty = _weighted_sample(diff_counts, 1)[0]
-            # Question type: lower Bloom levels favor multiple choice.
+            # Question type: lower Bloom levels favor multiple choice;
+            # the choice is restricted to the blueprint's allowed types.
             if bloom in (BloomLevel.REMEMBER, BloomLevel.UNDERSTAND):
-                qtype = random.choice(
-                    [QuestionType.MULTIPLE_CHOICE, QuestionType.TRUE_FALSE]
-                )
+                preferred = [QuestionType.MULTIPLE_CHOICE, QuestionType.TRUE_FALSE]
             elif bloom == BloomLevel.CREATE:
-                qtype = QuestionType.ESSAY
+                preferred = [QuestionType.ESSAY]
             else:
-                qtype = random.choice(
-                    [QuestionType.MULTIPLE_CHOICE, QuestionType.SHORT_ANSWER, QuestionType.ESSAY]
-                )
+                preferred = [
+                    QuestionType.MULTIPLE_CHOICE,
+                    QuestionType.SHORT_ANSWER,
+                    QuestionType.ESSAY,
+                ]
+            candidates = [qt for qt in preferred if qt in allowed]
+            if not candidates:
+                # The allowed set excludes the Bloom level's preferred types:
+                # fall back to any allowed type (deterministic pick).
+                candidates = allowed
+            qtype = random.choice(candidates)
             pending.append(
                 ItemSpec(
                     topic=topic,
