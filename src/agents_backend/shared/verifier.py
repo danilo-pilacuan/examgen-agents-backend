@@ -70,7 +70,9 @@ def review_question(item: dict | "GeneratedItem") -> AIReviewResult:
         "Criteria:\n"
         "- Is the statement AMBIGUOUS or confusing?\n"
         "- Is the expected answer CORRECT and well justified?\n"
-        "- Is the question RELEVANT to the topic?\n\n"
+        "- Is the question RELEVANT to the topic?\n"
+        "- Is the question written in ENGLISH? A question in another language "
+        "is not acceptable (mark answer_correct=False and note it).\n\n"
         "Question to review:\n"
         f"{item}"
     )

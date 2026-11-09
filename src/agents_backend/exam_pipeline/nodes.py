@@ -143,12 +143,42 @@ def ingestor_node(state: dict) -> dict:
     For the MVP it doesn't call the LLM: extracts text from PDFs, DOCX, PPTX,
     XLSX and text files, and builds a basic summary. (Full vector indexing is
     a later phase.)
+
+    When the pipeline runs without files (API path: RAG reads chunks from the
+    DB), reports the real count of indexed chunks of the subject instead of a
+    constant 0 (BUG-027 fix #2).
     """
     raw_paths = state.get("raw_materials_paths", [])
     chunks_count = 0
     fragments: list[str] = []
     processed: list[str] = []
     failed: list[str] = []
+
+    if not raw_paths:
+        try:
+            from sqlalchemy import func as sa_func
+
+            from core.domain.models import MaterialChunk
+            from core.infrastructure.db.connection import SessionLocal
+
+            db = SessionLocal()
+            try:
+                chunks_count = (
+                    db.query(sa_func.count(MaterialChunk.id))
+                    .filter(MaterialChunk.subject_id == uuid.UUID(state["subject_id"]))
+                    .scalar()
+                    or 0
+                )
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001
+            chunks_count = 0
+        return {
+            "syllabus_summary": "No materials loaded (using the subject's indexed material via RAG).",
+            "indexed_chunks_count": chunks_count,
+            "processed_files": [],
+            "failed_files": [],
+        }
 
     for path in raw_paths:
         path = str(path)
@@ -208,6 +238,10 @@ def planner_node(state: dict) -> dict:
 
     topics = [t for t, c in topic_counts.items() for _ in range(c)]
 
+    # Question types the professor allows (third review, Felipe). The
+    # blueprint validator guarantees a non-empty list.
+    allowed = list(blueprint.allowed_question_types)
+
     pending: list[ItemSpec] = []
     spec_index = 0
     for bloom, n_bloom in bloom_counts.items():
@@ -215,17 +249,24 @@ def planner_node(state: dict) -> dict:
             topic = topics[spec_index % len(topics)] if topics else "general"
             # Difficulty distribution within the current Bloom level.
             difficulty = _weighted_sample(diff_counts, 1)[0]
-            # Question type: lower Bloom levels favor multiple choice.
+            # Question type: lower Bloom levels favor multiple choice;
+            # the choice is restricted to the blueprint's allowed types.
             if bloom in (BloomLevel.REMEMBER, BloomLevel.UNDERSTAND):
-                qtype = random.choice(
-                    [QuestionType.MULTIPLE_CHOICE, QuestionType.TRUE_FALSE]
-                )
+                preferred = [QuestionType.MULTIPLE_CHOICE, QuestionType.TRUE_FALSE]
             elif bloom == BloomLevel.CREATE:
-                qtype = QuestionType.ESSAY
+                preferred = [QuestionType.ESSAY]
             else:
-                qtype = random.choice(
-                    [QuestionType.MULTIPLE_CHOICE, QuestionType.SHORT_ANSWER, QuestionType.ESSAY]
-                )
+                preferred = [
+                    QuestionType.MULTIPLE_CHOICE,
+                    QuestionType.SHORT_ANSWER,
+                    QuestionType.ESSAY,
+                ]
+            candidates = [qt for qt in preferred if qt in allowed]
+            if not candidates:
+                # The allowed set excludes the Bloom level's preferred types:
+                # fall back to any allowed type (deterministic pick).
+                candidates = allowed
+            qtype = random.choice(candidates)
             pending.append(
                 ItemSpec(
                     topic=topic,
@@ -285,6 +326,9 @@ def generator_node(state: dict) -> dict:
         f"- Difficulty: {spec.difficulty.value}\n"
         f"- Question type: {spec.question_type.value}\n"
         f"- Points: {spec.points}\n\n"
+        "LANGUAGE (mandatory): write the statement, every option, the "
+        "expected answer and the solution explanation in ENGLISH, regardless "
+        "of the language of the context material.\n\n"
         f"{context}\n\n"
         "Return only the requested structure."
     )
@@ -373,6 +417,10 @@ def evaluator_node(state: dict) -> dict:
     prompt = (
         "You are a rigorous exam item evaluator. Evaluate the following "
         "question and respond with the requested structure.\n\n"
+        "Criteria:\n"
+        "- APPROVE only if the item is written in ENGLISH (reject items in "
+        "any other language with rejection_reason='language_not_english').\n"
+        "- Evaluate pedagogical quality and difficulty match.\n\n"
         f"Requested specification:\n- Topic: {spec.topic}\n"
         f"- Bloom level: {spec.bloom_level.value}\n"
         f"- Difficulty: {spec.difficulty.value}\n"

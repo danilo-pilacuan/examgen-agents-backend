@@ -267,6 +267,9 @@ def generate_question(
         "You are an exam item generator. Generate EXACTLY ONE question "
         f"on the topic '{topic}' of the subject '{subject_name}', with difficulty "
         f"'{difficulty}'. Use the material context if available.\n\n"
+        "LANGUAGE (mandatory): write the question, every option and the "
+        "expected answer in ENGLISH, regardless of the language of the "
+        "material context or the subject name.\n\n"
         f"{context or 'No additional context from the material.'}\n\n"
         "Return only the requested structure."
     )
